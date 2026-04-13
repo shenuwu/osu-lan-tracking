@@ -214,8 +214,12 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
         end_after = timeframe_hours * 3600 if timeframe_hours > 0 else None
-        self.bot.loop.create_task(
-            self.bot.get_cog("TrackingCog").run_tracking(interaction.guild.id, session["id"], interval, end_after)
+        tracking_cog = self.bot.get_cog("TrackingCog")
+        if not tracking_cog:
+            await interaction.followup.send("❌ TrackingCog niet geladen.", ephemeral=True)
+            return
+        asyncio.ensure_future(
+            tracking_cog.run_tracking(interaction.guild.id, session["id"], interval, end_after)
         )
 
     @app_commands.command(name="stop_tracking", description="[Admin] Stop de actieve score tracking")
