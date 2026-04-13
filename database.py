@@ -130,6 +130,10 @@ class Database:
         async with self.pool.acquire() as conn:
             return await conn.fetchrow("SELECT * FROM pools WHERE channel_id=$1", channel_id)
 
+    async def get_pool_by_id(self, pool_id):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("SELECT * FROM pools WHERE id=$1", pool_id)
+
     async def get_all_pools(self, guild_id):
         async with self.pool.acquire() as conn:
             return await conn.fetch("SELECT * FROM pools WHERE guild_id=$1 ORDER BY created_at", guild_id)

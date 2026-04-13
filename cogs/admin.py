@@ -52,6 +52,19 @@ def is_admin():
     return app_commands.check(predicate)
 
 
+async def pool_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete die alle pools voor de huidige guild teruggeeft."""
+    try:
+        pools = await interaction.client.db.get_all_pools(interaction.guild.id)
+        return [
+            app_commands.Choice(name=p["name"], value=str(p["id"]))
+            for p in pools
+            if current.lower() in p["name"].lower()
+        ][:25]
+    except Exception:
+        return []
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -127,49 +140,61 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="add_map", description="[Admin] Voeg een beatmap toe aan een pool")
-    @app_commands.describe(pool_channel="Het pool channel", beatmap_id="osu! beatmap ID", slot="Bijv. NM1, HD2, HR1")
+    @app_commands.describe(pool="Pool naam (kies uit de lijst)", beatmap_id="osu! beatmap ID", slot="Bijv. NM1, HD2, HR1")
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @is_admin()
-    async def add_map(self, interaction: discord.Interaction, pool_channel: discord.Thread, beatmap_id: int, slot: str):
+    async def add_map(self, interaction: discord.Interaction, pool: str, beatmap_id: int, slot: str):
         await interaction.response.defer(ephemeral=True)
-        pool = await self.db.get_pool_by_channel(pool_channel.id)
-        if not pool:
-            return await interaction.followup.send("❌ Dat channel is geen geregistreerde pool.", ephemeral=True)
+        pool_row = await self.db.get_pool_by_id(int(pool))
+        if not pool_row:
+            return await interaction.followup.send("❌ Pool niet gevonden.", ephemeral=True)
         bm = await self.osu.get_beatmap(beatmap_id)
         if not bm:
             return await interaction.followup.send(f"❌ Beatmap `{beatmap_id}` niet gevonden.", ephemeral=True)
         bms = bm.get("beatmapset", {})
         await self.db.add_map_to_pool(
-            pool["id"], beatmap_id, bms.get("id"),
+            pool_row["id"], beatmap_id, bms.get("id"),
             bms.get("title", "Unknown"), bms.get("artist", "Unknown"),
             bm.get("version", "Unknown"), slot.upper()
         )
-        logger.info(f"Map toegevoegd: {slot.upper()} beatmap_id={beatmap_id} aan pool '{pool['name']}'")
+        logger.info(f"Map toegevoegd: {slot.upper()} beatmap_id={beatmap_id} aan pool '{pool_row['name']}'")
         await interaction.followup.send(
-            f"✅ **{slot.upper()}** — {bms.get('artist')} - {bms.get('title')} [{bm.get('version')}] toegevoegd aan pool **{pool['name']}**",
+            f"✅ **{slot.upper()}** — {bms.get('artist')} - {bms.get('title')} [{bm.get('version')}] toegevoegd aan pool **{pool_row['name']}**",
             ephemeral=True
         )
-        await self._update_pool_leaderboard(pool_channel, pool["id"], pool["name"])
+        thread = interaction.guild.get_channel_or_thread(pool_row["channel_id"])
+        if thread:
+            await self._update_pool_leaderboard(thread, pool_row["id"], pool_row["name"])
 
     @app_commands.command(name="remove_map", description="[Admin] Verwijder een beatmap uit een pool")
+    @app_commands.describe(pool="Pool naam (kies uit de lijst)", beatmap_id="osu! beatmap ID")
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @is_admin()
-    async def remove_map(self, interaction: discord.Interaction, pool_channel: discord.Thread, beatmap_id: int):
+    async def remove_map(self, interaction: discord.Interaction, pool: str, beatmap_id: int):
         await interaction.response.defer(ephemeral=True)
-        pool = await self.db.get_pool_by_channel(pool_channel.id)
-        if not pool:
-            return await interaction.followup.send("❌ Geen pool gevonden voor dit channel.", ephemeral=True)
-        await self.db.remove_map_from_pool(pool["id"], beatmap_id)
-        await interaction.followup.send(f"✅ Beatmap `{beatmap_id}` verwijderd uit pool **{pool['name']}**.", ephemeral=True)
-        await self._update_pool_leaderboard(pool_channel, pool["id"], pool["name"])
+        pool_row = await self.db.get_pool_by_id(int(pool))
+        if not pool_row:
+            return await interaction.followup.send("❌ Pool niet gevonden.", ephemeral=True)
+        await self.db.remove_map_from_pool(pool_row["id"], beatmap_id)
+        await interaction.followup.send(f"✅ Beatmap `{beatmap_id}` verwijderd uit pool **{pool_row['name']}**.", ephemeral=True)
+        thread = interaction.guild.get_channel_or_thread(pool_row["channel_id"])
+        if thread:
+            await self._update_pool_leaderboard(thread, pool_row["id"], pool_row["name"])
 
-    @app_commands.command(name="refresh_leaderboard", description="[Admin] Herlaad het leaderboard van een pool channel")
+    @app_commands.command(name="refresh_leaderboard", description="[Admin] Herlaad het leaderboard van een pool")
+    @app_commands.describe(pool="Pool naam (kies uit de lijst)")
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @is_admin()
-    async def refresh_leaderboard(self, interaction: discord.Interaction, pool_channel: discord.Thread):
+    async def refresh_leaderboard(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer(ephemeral=True)
-        pool = await self.db.get_pool_by_channel(pool_channel.id)
-        if not pool:
-            return await interaction.followup.send("❌ Geen pool gevonden voor dit channel.", ephemeral=True)
-        await self._update_pool_leaderboard(pool_channel, pool["id"], pool["name"])
-        await interaction.followup.send(f"✅ Leaderboard van **{pool['name']}** vernieuwd.", ephemeral=True)
+        pool_row = await self.db.get_pool_by_id(int(pool))
+        if not pool_row:
+            return await interaction.followup.send("❌ Pool niet gevonden.", ephemeral=True)
+        thread = interaction.guild.get_channel_or_thread(pool_row["channel_id"])
+        if not thread:
+            return await interaction.followup.send("❌ Thread niet gevonden. Is de thread gearchiveerd?", ephemeral=True)
+        await self._update_pool_leaderboard(thread, pool_row["id"], pool_row["name"])
+        await interaction.followup.send(f"✅ Leaderboard van **{pool_row['name']}** vernieuwd.", ephemeral=True)
 
     async def _update_pool_leaderboard(self, channel: discord.TextChannel, pool_id: int, pool_name: str):
         maps = await self.db.get_pool_maps(pool_id)
