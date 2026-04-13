@@ -55,13 +55,19 @@ def is_admin():
 async def pool_autocomplete(interaction: discord.Interaction, current: str):
     """Autocomplete die alle pools voor de huidige guild teruggeeft."""
     try:
-        pools = await interaction.client.db.get_all_pools(interaction.guild.id)
+        db = interaction.client.db
+        if db is None or db.pool is None:
+            logger.warning("pool_autocomplete: db niet beschikbaar")
+            return []
+        pools = await db.get_all_pools(interaction.guild.id)
+        logger.info(f"pool_autocomplete: {len(pools)} pools gevonden voor guild {interaction.guild.id}, current='{current}'")
         return [
             app_commands.Choice(name=p["name"], value=str(p["id"]))
             for p in pools
             if current.lower() in p["name"].lower()
         ][:25]
-    except Exception:
+    except Exception as e:
+        logger.exception(f"pool_autocomplete fout: {e}")
         return []
 
 
@@ -382,8 +388,5 @@ class AdminCog(commands.Cog):
 
 
 async def setup(bot):
-    bot.db = Database()
-    await bot.db.init()
-    bot.osu = OsuAPI()
-    await bot.osu.get_token()
+    # bot.db en bot.osu worden al geïnitialiseerd in bot.py main()
     await bot.add_cog(AdminCog(bot))

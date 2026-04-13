@@ -4,11 +4,11 @@ import os
 import asyncio
 import logging
 from database import Database
+from osu_api import OsuAPI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Logging instellen — Railway toont alles wat naar stdout/stderr gaat
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -20,11 +20,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-db = Database()
 
 @bot.event
 async def on_ready():
-    await db.init()
     logger.info(f"Bot online als {bot.user} (ID: {bot.user.id})")
     try:
         synced = await bot.tree.sync()
@@ -38,6 +36,16 @@ async def on_error(event, *args, **kwargs):
 
 async def main():
     async with bot:
+        # DB en osu API initialiseren VOOR cogs laden
+        # zodat autocomplete en alle cogs bot.db direct kunnen gebruiken
+        logger.info("Database initialiseren...")
+        bot.db = Database()
+        await bot.db.init()
+
+        logger.info("osu! API initialiseren...")
+        bot.osu = OsuAPI()
+        await bot.osu.get_token()
+
         logger.info("Extensions laden...")
         await bot.load_extension("cogs.admin")
         logger.info("cogs.admin geladen")
@@ -47,6 +55,7 @@ async def main():
         logger.info("cogs.stats geladen")
         await bot.load_extension("cogs.tracking")
         logger.info("cogs.tracking geladen")
+
         logger.info("Bot wordt gestart...")
         await bot.start(os.getenv("DISCORD_TOKEN"))
 
