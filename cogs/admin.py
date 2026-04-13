@@ -2,11 +2,43 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
+import logging
 from datetime import datetime, timezone
 from database import Database
 from osu_api import OsuAPI
+from mod_validator import describe_required_mods
 
-# Shared instances worden via bot doorgegeven
+logger = logging.getLogger("admin")
+
+# Volgorde van slot categorieën in de pool channel (van boven naar beneden)
+SLOT_ORDER = ["NM", "HD", "HR", "DT", "FM", "EX", "TB"]
+
+# Mod-info labels per slot categorie
+SLOT_MOD_LABELS = {
+    "NM": "🎵 Classic + NoFail verplicht",
+    "HD": "🔵 Classic + NoFail + Hidden verplicht",
+    "HR": "🔴 Classic + NoFail + HardRock verplicht",
+    "DT": "⚡ Classic + NoFail + DoubleTime verplicht",
+    "FM": "🆓 Vrij — geen EZ/HT",
+    "EX": "🌟 Extra — alles toegestaan",
+    "TB": "🏆 Tiebreaker — vrij, geen EZ/HT",
+}
+
+def get_slot_category(slot: str) -> str:
+    return "".join(c for c in slot.upper() if c.isalpha())
+
+def slot_sort_key(m) -> int:
+    cat = get_slot_category(m["slot"])
+    try:
+        base = SLOT_ORDER.index(cat) * 100
+    except ValueError:
+        base = 999
+    # Sorteer ook op het getal achter de categorie (NM1, NM2, ...)
+    num_part = "".join(c for c in m["slot"] if c.isdigit())
+    num = int(num_part) if num_part else 0
+    return base + num
+
+
 def get_db(bot) -> Database:
     return bot.db
 
@@ -43,6 +75,7 @@ class AdminCog(commands.Cog):
         if not user_data:
             return await interaction.followup.send(f"❌ osu! gebruiker `{osu_username}` niet gevonden.", ephemeral=True)
         await self.db.add_player(member.id, user_data["username"], user_data["id"], interaction.user.id)
+        logger.info(f"Speler toegevoegd: {user_data['username']} (osu_id={user_data['id']}) door {interaction.user}")
         await interaction.followup.send(
             f"✅ **{member.display_name}** gekoppeld aan osu! account **{user_data['username']}** (ID: {user_data['id']})",
             ephemeral=True
@@ -56,6 +89,7 @@ class AdminCog(commands.Cog):
         if not player:
             return await interaction.followup.send("❌ Speler niet gevonden in de database.", ephemeral=True)
         await self.db.remove_player(member.id)
+        logger.info(f"Speler verwijderd: {player['osu_username']} door {interaction.user}")
         await interaction.followup.send(f"✅ **{player['osu_username']}** verwijderd uit de tracker.", ephemeral=True)
 
     @app_commands.command(name="list_players", description="[Admin] Bekijk alle geregistreerde spelers")
@@ -88,6 +122,7 @@ class AdminCog(commands.Cog):
             topic=f"Leaderboard voor mappool: {name}"
         )
         pool = await self.db.create_pool(name, channel.id, interaction.guild.id, interaction.user.id)
+        logger.info(f"Pool aangemaakt: '{name}' (id={pool['id']}) in channel #{channel.name}")
         embed = discord.Embed(
             title=f"✅ Pool '{name}' aangemaakt",
             description=f"Channel: {channel.mention}\nPool ID: `{pool['id']}`\n\nGebruik `/add_map` om maps toe te voegen.",
@@ -112,11 +147,11 @@ class AdminCog(commands.Cog):
             bms.get("title", "Unknown"), bms.get("artist", "Unknown"),
             bm.get("version", "Unknown"), slot.upper()
         )
+        logger.info(f"Map toegevoegd: {slot.upper()} beatmap_id={beatmap_id} aan pool '{pool['name']}'")
         await interaction.followup.send(
             f"✅ **{slot.upper()}** — {bms.get('artist')} - {bms.get('title')} [{bm.get('version')}] toegevoegd aan pool **{pool['name']}**",
             ephemeral=True
         )
-        # Refresh leaderboard
         await self._update_pool_leaderboard(pool_channel, pool["id"], pool["name"])
 
     @app_commands.command(name="remove_map", description="[Admin] Verwijder een beatmap uit een pool")
@@ -143,6 +178,9 @@ class AdminCog(commands.Cog):
     async def _update_pool_leaderboard(self, channel: discord.TextChannel, pool_id: int, pool_name: str):
         maps = await self.db.get_pool_maps(pool_id)
         scores_raw = await self.db.get_pool_leaderboard(pool_id)
+
+        # Sorteer maps op SLOT_ORDER (NM→HD→HR→DT→FM→EX→TB) en daarna op slotnummer
+        maps = sorted(maps, key=slot_sort_key)
 
         # Groepeer scores per beatmap
         scores_by_map = {}
@@ -175,12 +213,17 @@ class AdminCog(commands.Cog):
                 lines.append(f"{emoji} **{s['osu_username']}** — `{s['score']:,}` | {acc} | {combo} {mods}")
 
             desc = "\n".join(lines) if lines else "*Nog geen scores*"
+
+            cat = get_slot_category(m["slot"])
+            mod_label = SLOT_MOD_LABELS.get(cat, describe_required_mods(m["slot"]))
+            required_mods = describe_required_mods(m["slot"])
+
             embed = discord.Embed(
                 title=f"**{m['slot']}** — {m['artist']} - {m['title']} [{m['version']}]",
                 description=desc,
                 color=0x44475A
             )
-            embed.set_footer(text=f"beatmap_id: {bid}")
+            embed.set_footer(text=f"{mod_label} ({required_mods}) • beatmap_id: {bid}")
             embeds.append(embed)
 
         # Verwijder oude messages
@@ -190,6 +233,8 @@ class AdminCog(commands.Cog):
         for i in range(0, len(embeds), 10):
             await channel.send(embeds=embeds[i:i+10])
 
+        logger.info(f"Leaderboard bijgewerkt voor pool '{pool_name}' ({len(maps)} maps, {len(embeds)-1} embeds)")
+
     # ── Tracking control ──────────────────────────────────────────────
 
     @app_commands.command(name="start_tracking", description="[Admin] Start score tracking voor alle geregistreerde spelers")
@@ -197,30 +242,52 @@ class AdminCog(commands.Cog):
     @is_admin()
     async def start_tracking(self, interaction: discord.Interaction, interval: int = 60, timeframe_hours: float = 0.0):
         await interaction.response.defer(ephemeral=True)
+
+        logger.info(f"start_tracking aangeroepen door {interaction.user} — interval={interval}s, timeframe={timeframe_hours}u")
+
         settings = await self.db.get_guild_settings(interaction.guild.id)
         if settings["tracking_active"]:
+            logger.warning("start_tracking: tracking is al actief")
             return await interaction.followup.send("⚠️ Tracking is al actief. Gebruik `/stop_tracking` eerst.", ephemeral=True)
+
+        players = await self.db.get_all_players()
+        if not players:
+            logger.warning("start_tracking: geen spelers geregistreerd")
+            return await interaction.followup.send("❌ Geen spelers geregistreerd. Voeg eerst spelers toe met `/add_player`.", ephemeral=True)
+
+        logger.info(f"start_tracking: {len(players)} spelers gevonden, sessie aanmaken...")
 
         session = await self.db.create_tracking_session(
             interaction.guild.id, interaction.user.id, datetime.now(timezone.utc), interval
         )
         await self.db.update_guild_settings(interaction.guild.id, tracking_active=True, tracking_session_id=session["id"])
+        logger.info(f"start_tracking: sessie aangemaakt id={session['id']}, tracking_active=True gezet")
+
+        tracking_cog = self.bot.get_cog("TrackingCog")
+        if not tracking_cog:
+            logger.error("start_tracking: TrackingCog niet gevonden!")
+            await interaction.followup.send("❌ TrackingCog is niet geladen. Herstart de bot.", ephemeral=True)
+            return
+
+        end_after = timeframe_hours * 3600 if timeframe_hours > 0 else None
+
+        # Gebruik bot.loop.create_task — dit is de betrouwbare manier
+        task = self.bot.loop.create_task(
+            tracking_cog.run_tracking(interaction.guild.id, session["id"], interval, end_after)
+        )
+        logger.info(f"start_tracking: tracking task aangemaakt ({task})")
 
         embed = discord.Embed(
             title="▶️ Tracking gestart",
-            description=f"**Interval:** {interval}s\n**Tijdsframe:** {'Oneindig' if timeframe_hours == 0 else f'{timeframe_hours}u'}\n**Sessie ID:** `{session['id']}`",
+            description=(
+                f"**Interval:** {interval}s\n"
+                f"**Tijdsframe:** {'Oneindig' if timeframe_hours == 0 else f'{timeframe_hours}u'}\n"
+                f"**Sessie ID:** `{session['id']}`\n"
+                f"**Spelers:** {len(players)}"
+            ),
             color=0x50FA7B
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-        end_after = timeframe_hours * 3600 if timeframe_hours > 0 else None
-        tracking_cog = self.bot.get_cog("TrackingCog")
-        if not tracking_cog:
-            await interaction.followup.send("❌ TrackingCog niet geladen.", ephemeral=True)
-            return
-        asyncio.ensure_future(
-            tracking_cog.run_tracking(interaction.guild.id, session["id"], interval, end_after)
-        )
 
     @app_commands.command(name="stop_tracking", description="[Admin] Stop de actieve score tracking")
     @is_admin()
@@ -232,6 +299,7 @@ class AdminCog(commands.Cog):
         await self.db.update_guild_settings(interaction.guild.id, tracking_active=False)
         if settings["tracking_session_id"]:
             await self.db.end_tracking_session(settings["tracking_session_id"])
+        logger.info(f"Tracking gestopt door {interaction.user}")
         await interaction.followup.send("⏹️ Tracking gestopt.", ephemeral=True)
 
     @app_commands.command(name="test_tracking", description="[Admin] Test tracking: poll scores 1x en log resultaten")
@@ -247,6 +315,7 @@ class AdminCog(commands.Cog):
             scores = await self.osu.get_recent_scores(player["osu_id"], limit=5)
             count = len(scores) if scores else 0
             results.append(f"**{player['osu_username']}**: {count} recente scores gevonden")
+            logger.info(f"[TestTracking] {player['osu_username']}: {count} scores")
 
         embed = discord.Embed(
             title="🧪 Test Tracking Resultaat",
@@ -260,6 +329,7 @@ class AdminCog(commands.Cog):
     @is_admin()
     async def set_score_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.db.update_guild_settings(interaction.guild.id, score_channel_id=channel.id)
+        logger.info(f"Score channel ingesteld op #{channel.name} door {interaction.user}")
         await interaction.response.send_message(f"✅ Score channel ingesteld op {channel.mention}", ephemeral=True)
 
     @app_commands.command(name="tracking_status", description="[Admin] Bekijk de huidige tracking status")
@@ -268,9 +338,16 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         settings = await self.db.get_guild_settings(interaction.guild.id)
         players = await self.db.get_all_players()
+
+        tracking_cog = self.bot.get_cog("TrackingCog")
+        has_active_task = interaction.guild.id in (tracking_cog._active_tasks if tracking_cog else {})
+
         status = "🟢 Actief" if settings["tracking_active"] else "🔴 Gestopt"
+        task_status = "✅ Task draait" if has_active_task else "⚠️ Geen actieve task"
+
         embed = discord.Embed(title="📡 Tracking Status", color=0x8BE9FD)
         embed.add_field(name="Status", value=status, inline=True)
+        embed.add_field(name="Task", value=task_status, inline=True)
         embed.add_field(name="Geregistreerde spelers", value=str(len(players)), inline=True)
         embed.add_field(name="Score channel", value=f"<#{settings['score_channel_id']}>" if settings["score_channel_id"] else "Niet ingesteld", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)

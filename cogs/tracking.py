@@ -1,13 +1,18 @@
 import discord
 from discord.ext import commands
 import asyncio
+import logging
 from datetime import datetime, timezone
+from mod_validator import validate_mods
+
+logger = logging.getLogger("tracking")
 
 
 class TrackingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._active_tasks = {}
+        logger.info("[TrackingCog] Cog geladen.")
 
     @property
     def db(self):
@@ -19,19 +24,20 @@ class TrackingCog(commands.Cog):
 
     async def run_tracking(self, guild_id: int, session_id: int, interval: int, end_after: float = None):
         """Main tracking loop. Polls alle geregistreerde spelers elke `interval` seconden."""
-        print(f"[Tracking] Gestart voor guild {guild_id}, sessie {session_id}")
+        logger.info(f"[Tracking] ▶️  Gestart voor guild {guild_id}, sessie {session_id}, interval={interval}s, end_after={end_after}")
         start = asyncio.get_event_loop().time()
         self._active_tasks[guild_id] = asyncio.current_task()
 
         try:
+            poll_count = 0
             while True:
                 settings = await self.db.get_guild_settings(guild_id)
                 if not settings["tracking_active"]:
-                    print(f"[Tracking] Gestopt voor guild {guild_id}")
+                    logger.info(f"[Tracking] ⏹️  tracking_active=False gedetecteerd voor guild {guild_id}, stoppen.")
                     break
 
                 if end_after and (asyncio.get_event_loop().time() - start) >= end_after:
-                    print(f"[Tracking] Tijdsframe verstreken voor guild {guild_id}")
+                    logger.info(f"[Tracking] ⏰ Tijdsframe verstreken voor guild {guild_id}")
                     await self.db.update_guild_settings(guild_id, tracking_active=False)
                     await self.db.end_tracking_session(session_id)
                     guild = self.bot.get_guild(guild_id)
@@ -41,27 +47,32 @@ class TrackingCog(commands.Cog):
                             await ch.send("⏹️ **Tracking automatisch gestopt** — tijdsframe verstreken.")
                     break
 
+                poll_count += 1
+                logger.info(f"[Tracking] 🔄 Poll #{poll_count} gestart voor guild {guild_id}")
                 await self._poll_all_players(guild_id, settings)
+                logger.info(f"[Tracking] ✅ Poll #{poll_count} klaar. Wacht {interval}s...")
                 await asyncio.sleep(interval)
 
         except asyncio.CancelledError:
-            print(f"[Tracking] Task gecancelled voor guild {guild_id}")
+            logger.warning(f"[Tracking] ❌ Task gecancelled voor guild {guild_id}")
         except Exception as e:
-            print(f"[Tracking] Fout: {e}")
+            logger.exception(f"[Tracking] 💥 Onverwachte fout voor guild {guild_id}: {e}")
         finally:
             self._active_tasks.pop(guild_id, None)
+            logger.info(f"[Tracking] Task beëindigd voor guild {guild_id}")
 
     async def _poll_all_players(self, guild_id: int, settings: dict):
         players = await self.db.get_all_players()
+        logger.info(f"[Tracking] {len(players)} spelers gevonden om te pollen")
+
         guild = self.bot.get_guild(guild_id)
         score_channel = None
         if guild and settings.get("score_channel_id"):
             score_channel = guild.get_channel(settings["score_channel_id"])
 
-        # Haal alle pool maps op per guild
         pools = await self.db.get_all_pools(guild_id)
         pool_map_ids = set()
-        pool_map_lookup = {}  # beatmap_id -> pool info
+        pool_map_lookup = {}
         for pool in pools:
             maps = await self.db.get_pool_maps(pool["id"])
             for m in maps:
@@ -69,10 +80,12 @@ class TrackingCog(commands.Cog):
                 pool_map_lookup[m["beatmap_id"]] = (pool, m)
 
         pool_channels_to_refresh = set()
+        new_scores_total = 0
 
         for player in players:
             try:
                 raw_scores = await self.osu.get_recent_scores(player["osu_id"], limit=50)
+                logger.info(f"[Tracking] {player['osu_username']}: {len(raw_scores) if raw_scores else 0} recente scores opgehaald")
                 if not raw_scores:
                     continue
 
@@ -85,27 +98,39 @@ class TrackingCog(commands.Cog):
                         continue
 
                     await self.db.save_score(parsed)
+                    new_scores_total += 1
+                    logger.info(f"[Tracking] 💾 Nieuwe score: {player['osu_username']} op beatmap {parsed['beatmap_id']} ({parsed['score']:,})")
 
-                    # Notificeer in score channel
-                    if score_channel:
-                        await self._post_score_notification(score_channel, parsed, player, raw)
-
-                    # Markeer pool channel voor refresh
                     bid = parsed["beatmap_id"]
                     if bid in pool_map_ids:
                         pool, m = pool_map_lookup[bid]
+                        is_valid, reason = validate_mods(parsed["mods"], m["slot"])
+                        if not is_valid:
+                            logger.info(f"[Tracking] ⚠️  Score ongeldig ({reason}) voor {player['osu_username']} op {m['slot']}")
+                            async with self.db.pool.acquire() as conn:
+                                await conn.execute(
+                                    "UPDATE scores SET is_valid=FALSE, invalid_reason=$1 WHERE osu_score_id=$2",
+                                    reason, parsed["osu_score_id"]
+                                )
+                            parsed["is_valid"] = False
+                            parsed["invalid_reason"] = reason
                         pool_channels_to_refresh.add((pool["channel_id"], pool["id"], pool["name"]))
 
-            except Exception as e:
-                print(f"[Tracking] Fout bij speler {player['osu_username']}: {e}")
+                    if score_channel:
+                        await self._post_score_notification(score_channel, parsed, player, raw)
 
-        # Refresh aangepaste pool leaderboards
+            except Exception as e:
+                logger.exception(f"[Tracking] Fout bij speler {player['osu_username']}: {e}")
+
+        logger.info(f"[Tracking] Poll klaar — {new_scores_total} nieuwe score(s), {len(pool_channels_to_refresh)} pool(s) refreshen")
+
         for (ch_id, pool_id, pool_name) in pool_channels_to_refresh:
             if guild:
                 ch = guild.get_channel(ch_id)
                 if ch:
                     admin_cog = self.bot.get_cog("AdminCog")
                     if admin_cog:
+                        logger.info(f"[Tracking] 🔃 Leaderboard refreshen voor pool '{pool_name}'")
                         await admin_cog._update_pool_leaderboard(ch, pool_id, pool_name)
 
     async def _post_score_notification(self, channel: discord.TextChannel, score: dict, player, raw: dict):
@@ -127,12 +152,13 @@ class TrackingCog(commands.Cog):
 
         mods = f" +{score['mods']}" if score['mods'] != 'NM' else ""
         passed = "✅" if score["is_pass"] else "❌"
+        valid_warning = f"\n⚠️ **Telt niet mee:** {score.get('invalid_reason', 'Ongeldige mods')}" if not score.get("is_valid", True) else ""
 
         embed = discord.Embed(
             title=f"{passed} {player['osu_username']}{mods}",
             url=beatmap_url,
-            description=f"**{artist} - {title} [{version}]**",
-            color=color
+            description=f"**{artist} - {title} [{version}]**{valid_warning}",
+            color=color if score.get("is_valid", True) else 0x6272A4
         )
         embed.add_field(name="Score", value=f"`{score['score']:,}`", inline=True)
         embed.add_field(name="Accuracy", value=f"`{score['accuracy']:.2f}%`", inline=True)

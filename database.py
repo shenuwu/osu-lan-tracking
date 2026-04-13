@@ -62,6 +62,8 @@ class Database:
                     count_miss INT DEFAULT 0,
                     pp FLOAT DEFAULT 0,
                     is_pass BOOLEAN DEFAULT TRUE,
+                    is_valid BOOLEAN DEFAULT TRUE,
+                    invalid_reason TEXT,
                     submitted_at TIMESTAMP NOT NULL,
                     tracked_at TIMESTAMP DEFAULT NOW()
                 );
@@ -85,6 +87,9 @@ class Database:
                     tracking_session_id INT REFERENCES tracking_sessions(id)
                 );
             """)
+            # Migraties voor bestaande databases
+            await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT TRUE")
+            await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS invalid_reason TEXT")
 
     # --- Players ---
     async def add_player(self, discord_id, osu_username, osu_id, added_by=None):
@@ -151,8 +156,8 @@ class Database:
             await conn.execute("""
                 INSERT INTO scores (osu_score_id, osu_id, discord_id, beatmap_id, score,
                     accuracy, max_combo, mods, rank, count_300, count_100, count_50,
-                    count_miss, pp, is_pass, submitted_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                    count_miss, pp, is_pass, is_valid, invalid_reason, submitted_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 ON CONFLICT (osu_score_id) DO NOTHING
             """,
             score_data["osu_score_id"], score_data["osu_id"], score_data.get("discord_id"),
@@ -160,6 +165,7 @@ class Database:
             score_data["max_combo"], score_data["mods"], score_data["rank"],
             score_data["count_300"], score_data["count_100"], score_data["count_50"],
             score_data["count_miss"], score_data.get("pp", 0), score_data["is_pass"],
+            score_data.get("is_valid", True), score_data.get("invalid_reason"),
             score_data["submitted_at"])
 
     async def score_exists(self, osu_score_id):
@@ -183,7 +189,7 @@ class Database:
                 FROM scores s
                 JOIN players p ON p.discord_id = s.discord_id
                 JOIN pool_maps pm ON pm.beatmap_id = s.beatmap_id
-                WHERE pm.pool_id = $1 AND s.is_pass = TRUE
+                WHERE pm.pool_id = $1 AND s.is_pass = TRUE AND s.is_valid = TRUE
                 ORDER BY pm.slot, s.score DESC
             """, pool_id)
 
