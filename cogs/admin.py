@@ -195,7 +195,7 @@ class AdminCog(commands.Cog):
     @app_commands.command(name="start_tracking", description="[Admin] Start score tracking voor alle geregistreerde spelers")
     @app_commands.describe(interval="Polling interval in seconden (standaard 60)", timeframe_hours="Hoelang tracken in uren (0 = oneindig)")
     @is_admin()
-    async def start_tracking(self, interaction: discord.Interaction, interval: int = 60, timeframe_hours: float = 0):
+    async def start_tracking(self, interaction: discord.Interaction, interval: int = 60, timeframe_hours: float = 0.0):
         await interaction.response.defer(ephemeral=True)
         settings = await self.db.get_guild_settings(interaction.guild.id)
         if settings["tracking_active"]:
