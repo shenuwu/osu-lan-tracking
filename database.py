@@ -1,6 +1,6 @@
 import asyncpg
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class Database:
@@ -20,7 +20,7 @@ class Database:
                     osu_username TEXT NOT NULL,
                     osu_id BIGINT NOT NULL UNIQUE,
                     added_by BIGINT,
-                    added_at TIMESTAMP DEFAULT NOW()
+                    added_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
                 CREATE TABLE IF NOT EXISTS pools (
@@ -29,7 +29,7 @@ class Database:
                     channel_id BIGINT UNIQUE,
                     guild_id BIGINT NOT NULL,
                     created_by BIGINT,
-                    created_at TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
                     active BOOLEAN DEFAULT TRUE
                 );
 
@@ -64,16 +64,16 @@ class Database:
                     is_pass BOOLEAN DEFAULT TRUE,
                     is_valid BOOLEAN DEFAULT TRUE,
                     invalid_reason TEXT,
-                    submitted_at TIMESTAMP NOT NULL,
-                    tracked_at TIMESTAMP DEFAULT NOW()
+                    submitted_at TIMESTAMPTZ NOT NULL,
+                    tracked_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
                 CREATE TABLE IF NOT EXISTS tracking_sessions (
                     id SERIAL PRIMARY KEY,
                     guild_id BIGINT NOT NULL,
                     started_by BIGINT,
-                    start_time TIMESTAMP NOT NULL,
-                    end_time TIMESTAMP,
+                    start_time TIMESTAMPTZ NOT NULL,
+                    end_time TIMESTAMPTZ,
                     interval_seconds INT DEFAULT 60,
                     is_test BOOLEAN DEFAULT FALSE,
                     active BOOLEAN DEFAULT TRUE
@@ -237,13 +237,13 @@ class Database:
             )
 
     # --- Tracking sessions ---
-    async def create_tracking_session(self, guild_id, started_by, start_time, interval, is_test=False):
+    async def create_tracking_session(self, guild_id, started_by, interval, is_test=False):
         async with self.pool.acquire() as conn:
             return await conn.fetchrow("""
                 INSERT INTO tracking_sessions (guild_id, started_by, start_time, interval_seconds, is_test, active)
-                VALUES ($1, $2, $3, $4, $5, TRUE)
+                VALUES ($1, $2, NOW(), $3, $4, TRUE)
                 RETURNING *
-            """, guild_id, started_by, start_time, interval, is_test)
+            """, guild_id, started_by, interval, is_test)
 
     async def end_tracking_session(self, session_id):
         async with self.pool.acquire() as conn:

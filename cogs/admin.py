@@ -15,13 +15,13 @@ SLOT_ORDER = ["NM", "HD", "HR", "DT", "FM", "EX", "TB"]
 
 # Mod-info labels per slot categorie
 SLOT_MOD_LABELS = {
-    "NM": "🎵 Classic + NoFail verplicht",
-    "HD": "🔵 Classic + NoFail + Hidden verplicht",
-    "HR": "🔴 Classic + NoFail + HardRock verplicht",
-    "DT": "⚡ Classic + NoFail + DoubleTime verplicht",
-    "FM": "🆓 Vrij — geen EZ/HT",
+    "NM": "🎵 ScoreV2 + NoFail verplicht",
+    "HD": "🔵 ScoreV2 + NoFail + Hidden verplicht",
+    "HR": "🔴 ScoreV2 + NoFail + HardRock verplicht",
+    "DT": "⚡ ScoreV2 + NoFail + DoubleTime verplicht",
+    "FM": "🆓 ScoreV2 + NoFail verplicht — overige mods vrij (geen EZ/HT)",
     "EX": "🌟 Extra — alles toegestaan",
-    "TB": "🏆 Tiebreaker — vrij, geen EZ/HT",
+    "TB": "🏆 Tiebreaker — ScoreV2 + NoFail, overige mods vrij (geen EZ/HT)",
 }
 
 def get_slot_category(slot: str) -> str:
@@ -106,26 +106,22 @@ class AdminCog(commands.Cog):
 
     # ── Pool management ────────────────────────────────────────────────
 
-    @app_commands.command(name="create_pool", description="[Admin] Maak een mappool channel aan")
-    @app_commands.describe(name="Naam van de pool (bijv. NM, HD, HR)", category="Optionele categorie voor het channel")
+    @app_commands.command(name="create_pool", description="[Admin] Maak een mappool thread aan")
+    @app_commands.describe(name="Naam van de pool (bijv. NM, HD, HR)", parent_channel="Channel waar de thread in aangemaakt wordt")
     @is_admin()
-    async def create_pool(self, interaction: discord.Interaction, name: str, category: discord.CategoryChannel = None):
+    async def create_pool(self, interaction: discord.Interaction, name: str, parent_channel: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(send_messages=False),
-            interaction.guild.me: discord.PermissionOverwrite(send_messages=True, manage_messages=True)
-        }
-        channel = await interaction.guild.create_text_channel(
+        # Stuur een bericht in het parent channel en maak daar een thread van
+        msg = await parent_channel.send(f"📋 **Pool: {name}** — leaderboard thread")
+        thread = await msg.create_thread(
             name=f"pool-{name.lower()}",
-            category=category,
-            overwrites=overwrites,
-            topic=f"Leaderboard voor mappool: {name}"
+            auto_archive_duration=10080,  # 7 dagen
         )
-        pool = await self.db.create_pool(name, channel.id, interaction.guild.id, interaction.user.id)
-        logger.info(f"Pool aangemaakt: '{name}' (id={pool['id']}) in channel #{channel.name}")
+        pool = await self.db.create_pool(name, thread.id, interaction.guild.id, interaction.user.id)
+        logger.info(f"Pool thread aangemaakt: '{name}' (id={pool['id']}) als thread #{thread.name}")
         embed = discord.Embed(
             title=f"✅ Pool '{name}' aangemaakt",
-            description=f"Channel: {channel.mention}\nPool ID: `{pool['id']}`\n\nGebruik `/add_map` om maps toe te voegen.",
+            description=f"Thread: {thread.mention}\nPool ID: `{pool['id']}`\n\nGebruik `/add_map` om maps toe te voegen.",
             color=0x50FA7B
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -133,7 +129,7 @@ class AdminCog(commands.Cog):
     @app_commands.command(name="add_map", description="[Admin] Voeg een beatmap toe aan een pool")
     @app_commands.describe(pool_channel="Het pool channel", beatmap_id="osu! beatmap ID", slot="Bijv. NM1, HD2, HR1")
     @is_admin()
-    async def add_map(self, interaction: discord.Interaction, pool_channel: discord.TextChannel, beatmap_id: int, slot: str):
+    async def add_map(self, interaction: discord.Interaction, pool_channel: discord.Thread, beatmap_id: int, slot: str):
         await interaction.response.defer(ephemeral=True)
         pool = await self.db.get_pool_by_channel(pool_channel.id)
         if not pool:
@@ -156,7 +152,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="remove_map", description="[Admin] Verwijder een beatmap uit een pool")
     @is_admin()
-    async def remove_map(self, interaction: discord.Interaction, pool_channel: discord.TextChannel, beatmap_id: int):
+    async def remove_map(self, interaction: discord.Interaction, pool_channel: discord.Thread, beatmap_id: int):
         await interaction.response.defer(ephemeral=True)
         pool = await self.db.get_pool_by_channel(pool_channel.id)
         if not pool:
@@ -167,7 +163,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="refresh_leaderboard", description="[Admin] Herlaad het leaderboard van een pool channel")
     @is_admin()
-    async def refresh_leaderboard(self, interaction: discord.Interaction, pool_channel: discord.TextChannel):
+    async def refresh_leaderboard(self, interaction: discord.Interaction, pool_channel: discord.Thread):
         await interaction.response.defer(ephemeral=True)
         pool = await self.db.get_pool_by_channel(pool_channel.id)
         if not pool:
@@ -226,8 +222,15 @@ class AdminCog(commands.Cog):
             embed.set_footer(text=f"{mod_label} ({required_mods}) • beatmap_id: {bid}")
             embeds.append(embed)
 
-        # Verwijder oude messages
-        await channel.purge(limit=100)
+        # Verwijder oude messages (threads hebben geen purge, dus handmatig)
+        try:
+            async for msg in channel.history(limit=100):
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Kon oude berichten niet verwijderen: {e}")
 
         # Stuur nieuwe embeds (max 10 per keer)
         for i in range(0, len(embeds), 10):
@@ -258,7 +261,7 @@ class AdminCog(commands.Cog):
         logger.info(f"start_tracking: {len(players)} spelers gevonden, sessie aanmaken...")
 
         session = await self.db.create_tracking_session(
-            interaction.guild.id, interaction.user.id, datetime.now(timezone.utc), interval
+            interaction.guild.id, interaction.user.id, interval
         )
         await self.db.update_guild_settings(interaction.guild.id, tracking_active=True, tracking_session_id=session["id"])
         logger.info(f"start_tracking: sessie aangemaakt id={session['id']}, tracking_active=True gezet")

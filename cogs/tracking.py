@@ -126,7 +126,8 @@ class TrackingCog(commands.Cog):
 
         for (ch_id, pool_id, pool_name) in pool_channels_to_refresh:
             if guild:
-                ch = guild.get_channel(ch_id)
+                # Pools zijn threads — get_channel_or_thread werkt voor beide
+                ch = guild.get_channel_or_thread(ch_id)
                 if ch:
                     admin_cog = self.bot.get_cog("AdminCog")
                     if admin_cog:
