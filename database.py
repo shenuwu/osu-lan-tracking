@@ -90,6 +90,7 @@ class Database:
             # Migraties voor bestaande databases
             await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT TRUE")
             await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS invalid_reason TEXT")
+            await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT")
 
     # --- Players ---
     async def add_player(self, discord_id, osu_username, osu_id, added_by=None):
@@ -249,9 +250,38 @@ class Database:
                 RETURNING *
             """, guild_id, started_by, interval, is_test)
 
+    async def delete_pool(self, pool_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pools WHERE id=$1", pool_id)
+
+    async def get_all_scores_raw(self, limit=200):
+        """Voor debug: haal recente ruwe scores op."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT s.*, p.osu_username FROM scores s
+                LEFT JOIN players p ON p.discord_id = s.discord_id
+                ORDER BY s.tracked_at DESC LIMIT $1
+            """, limit)
+
     async def end_tracking_session(self, session_id):
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE tracking_sessions SET active=FALSE, end_time=NOW()
                 WHERE id=$1
             """, session_id)
+
+    async def delete_pool(self, pool_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pools WHERE id=$1", pool_id)
+
+    async def get_all_scores_raw(self, limit=50):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT s.*, p.osu_username FROM scores s
+                LEFT JOIN players p ON p.discord_id = s.discord_id
+                ORDER BY s.tracked_at DESC LIMIT $1
+            """, limit)
+
+    async def get_score_by_osu_id(self, osu_score_id: int):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("SELECT * FROM scores WHERE osu_score_id=$1", osu_score_id)

@@ -55,19 +55,13 @@ def is_admin():
 async def pool_autocomplete(interaction: discord.Interaction, current: str):
     """Autocomplete die alle pools voor de huidige guild teruggeeft."""
     try:
-        db = interaction.client.db
-        if db is None or db.pool is None:
-            logger.warning("pool_autocomplete: db niet beschikbaar")
-            return []
-        pools = await db.get_all_pools(interaction.guild.id)
-        logger.info(f"pool_autocomplete: {len(pools)} pools gevonden voor guild {interaction.guild.id}, current='{current}'")
+        pools = await interaction.client.db.get_all_pools(interaction.guild.id)
         return [
             app_commands.Choice(name=p["name"], value=str(p["id"]))
             for p in pools
             if current.lower() in p["name"].lower()
         ][:25]
-    except Exception as e:
-        logger.exception(f"pool_autocomplete fout: {e}")
+    except Exception:
         return []
 
 
@@ -386,6 +380,144 @@ class AdminCog(commands.Cog):
         embed.add_field(name="Score channel", value=f"<#{settings['score_channel_id']}>" if settings["score_channel_id"] else "Niet ingesteld", inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+
+    @app_commands.command(name="delete_pool", description="[Admin] Verwijder een mappool volledig")
+    @app_commands.describe(pool="Pool naam (kies uit de lijst)")
+    @app_commands.autocomplete(pool=pool_autocomplete)
+    @is_admin()
+    async def delete_pool(self, interaction: discord.Interaction, pool: str):
+        await interaction.response.defer(ephemeral=True)
+        pool_row = await self.db.get_pool_by_id(int(pool))
+        if not pool_row:
+            return await interaction.followup.send("❌ Pool niet gevonden.", ephemeral=True)
+
+        pool_name = pool_row["name"]
+        thread = interaction.guild.get_channel_or_thread(pool_row["channel_id"])
+
+        await self.db.delete_pool(pool_row["id"])
+        logger.info(f"Pool '{pool_name}' verwijderd door {interaction.user}")
+
+        msg = f"✅ Pool **{pool_name}** verwijderd uit de database."
+        if thread:
+            try:
+                await thread.delete()
+                msg += " Thread ook verwijderd."
+            except Exception:
+                msg += " ⚠️ Thread kon niet verwijderd worden (al weg?)."
+
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @app_commands.command(name="set_log_channel", description="[Admin] Stel het channel in voor bot logs en score debug info")
+    @is_admin()
+    async def set_log_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await self.db.update_guild_settings(interaction.guild.id, log_channel_id=channel.id)
+        logger.info(f"Log channel ingesteld op #{channel.name} door {interaction.user}")
+        await interaction.response.send_message(
+            f"✅ Log channel ingesteld op {channel.mention}\n"
+            "Alle tracking logs, raw API scores en fouten komen hier.",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="check_score", description="[Admin] Debug: bekijk een opgeslagen score op osu! score ID")
+    @app_commands.describe(osu_score_id="De osu! score ID om op te zoeken")
+    @is_admin()
+    async def check_score(self, interaction: discord.Interaction, osu_score_id: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            score = await self.db.get_score_by_osu_id(int(osu_score_id))
+        except ValueError:
+            return await interaction.followup.send("❌ Ongeldig score ID.", ephemeral=True)
+
+        if not score:
+            return await interaction.followup.send(f"❌ Score `{osu_score_id}` niet gevonden in de database.", ephemeral=True)
+
+        embed = discord.Embed(title=f"🔍 Score Debug: {osu_score_id}", color=0x8BE9FD)
+        embed.add_field(name="osu_score_id", value=f"`{score['osu_score_id']}`", inline=True)
+        embed.add_field(name="beatmap_id", value=f"`{score['beatmap_id']}`", inline=True)
+        embed.add_field(name="Mods", value=f"`{score['mods']}`", inline=True)
+        embed.add_field(name="Score", value=f"`{score['score']:,}`", inline=True)
+        embed.add_field(name="Accuracy", value=f"`{score['accuracy']:.2f}%`", inline=True)
+        embed.add_field(name="Rank", value=f"`{score['rank']}`", inline=True)
+        embed.add_field(name="is_pass", value=f"`{score['is_pass']}`", inline=True)
+        embed.add_field(name="is_valid", value=f"`{score['is_valid']}`", inline=True)
+        embed.add_field(name="invalid_reason", value=f"`{score['invalid_reason'] or 'N/A'}`", inline=False)
+        embed.add_field(name="submitted_at", value=f"`{score['submitted_at']}`", inline=True)
+        embed.add_field(name="tracked_at", value=f"`{score['tracked_at']}`", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="recent_scores_db", description="[Admin] Bekijk de laatste scores in de database")
+    @app_commands.describe(limit="Aantal scores (max 20)")
+    @is_admin()
+    async def recent_scores_db(self, interaction: discord.Interaction, limit: int = 10):
+        await interaction.response.defer(ephemeral=True)
+        limit = min(limit, 20)
+        scores = await self.db.get_all_scores_raw(limit)
+        if not scores:
+            return await interaction.followup.send("Geen scores in de database.", ephemeral=True)
+
+        lines = []
+        for s in scores:
+            valid = "✅" if s["is_valid"] else "⚠️"
+            passed = "✓" if s["is_pass"] else "✗"
+            lines.append(
+                f"{valid} **{s['osu_username'] or '?'}** — `{s['score']:,}` | `{s['mods']}` | "
+                f"bm:`{s['beatmap_id']}` | {passed} | `{s['tracked_at'].strftime('%H:%M:%S')}`"
+            )
+
+        embed = discord.Embed(
+            title=f"🗄️ Laatste {limit} scores in DB",
+            description="\n".join(lines),
+            color=0x6272A4
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="force_poll", description="[Admin] Forceer 1 poll-ronde nu (zonder tracking te starten)")
+    @is_admin()
+    async def force_poll(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        players = await self.db.get_all_players()
+        if not players:
+            return await interaction.followup.send("❌ Geen spelers geregistreerd.", ephemeral=True)
+
+        tracking_cog = self.bot.get_cog("TrackingCog")
+        if not tracking_cog:
+            return await interaction.followup.send("❌ TrackingCog niet geladen.", ephemeral=True)
+
+        await interaction.followup.send(f"🔄 Forceer poll voor {len(players)} speler(s)...", ephemeral=True)
+        settings = await self.db.get_guild_settings(interaction.guild.id)
+        await tracking_cog._poll_all_players(interaction.guild.id, settings)
+        await interaction.followup.send("✅ Force poll klaar. Check het log channel voor details.", ephemeral=True)
+
+    @app_commands.command(name="list_pools", description="Bekijk alle actieve pools in deze server")
+    async def list_pools(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        pools = await self.db.get_all_pools(interaction.guild.id)
+        if not pools:
+            return await interaction.followup.send("Geen pools aangemaakt.", ephemeral=True)
+
+        lines = []
+        for p in pools:
+            thread = interaction.guild.get_channel_or_thread(p["channel_id"])
+            thread_mention = thread.mention if thread else f"*(thread weg, id={p['channel_id']})*"
+            maps = await self.db.get_pool_maps(p["id"])
+            lines.append(f"**{p['name']}** (ID: `{p['id']}`) — {thread_mention} — {len(maps)} maps")
+
+        embed = discord.Embed(title="🗂️ Actieve Pools", description="\n".join(lines), color=0xBD93F9)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="clear_scores", description="[Admin] ⚠️ Verwijder ALLE scores uit de database (niet ongedaan te maken)")
+    @is_admin()
+    async def clear_scores(self, interaction: discord.Interaction, confirm: str = ""):
+        if confirm != "JA_IK_WEET_HET_ZEKER":
+            return await interaction.response.send_message(
+                "⚠️ Dit verwijdert **alle scores**. Gebruik:\n`/clear_scores confirm:JA_IK_WEET_HET_ZEKER`",
+                ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        async with self.db.pool.acquire() as conn:
+            await conn.execute("DELETE FROM scores")
+        logger.warning(f"Alle scores verwijderd door {interaction.user}")
+        await interaction.followup.send("🗑️ Alle scores verwijderd.", ephemeral=True)
 
 async def setup(bot):
     # bot.db en bot.osu worden al geïnitialiseerd in bot.py main()
