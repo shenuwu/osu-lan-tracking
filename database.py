@@ -3,6 +3,16 @@ import os
 from datetime import datetime, timezone
 
 
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC). Fixes naive datetimes from osu API."""
+    if dt is None:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class Database:
     def __init__(self):
         self.pool = None
@@ -171,7 +181,7 @@ class Database:
             score_data["count_300"], score_data["count_100"], score_data["count_50"],
             score_data["count_miss"], score_data.get("pp", 0), score_data["is_pass"],
             score_data.get("is_valid", True), score_data.get("invalid_reason"),
-            score_data["submitted_at"])
+            _ensure_utc(score_data["submitted_at"]))
 
     async def score_exists(self, osu_score_id):
         async with self.pool.acquire() as conn:
