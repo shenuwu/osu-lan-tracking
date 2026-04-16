@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 
 
 def _ensure_utc(dt: datetime) -> datetime:
-    """Ensure a datetime is timezone-aware (UTC). Fixes naive datetimes from osu API."""
+    """Convert to naive UTC datetime, which is what asyncpg expects for TIMESTAMPTZ columns."""
     if dt is None:
-        return datetime.now(timezone.utc)
+        return datetime.utcnow()
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+        return dt  # already naive UTC
+    # Convert aware datetime to naive UTC
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 class Database:
@@ -18,16 +19,7 @@ class Database:
         self.pool = None
 
     async def init(self):
-        async def _init_conn(conn):
-            await conn.set_type_codec(
-                "timestamptz",
-                encoder=lambda dt: _ensure_utc(dt).isoformat(),
-                decoder=lambda s: datetime.fromisoformat(s) if isinstance(s, str) else s,
-                schema="pg_catalog",
-                format="text",
-            )
-
-        self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"), init=_init_conn)
+        self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
         await self.create_tables()
         print("Database verbonden en tabellen aangemaakt")
 
