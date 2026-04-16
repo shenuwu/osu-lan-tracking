@@ -1,6 +1,6 @@
 import aiohttp
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class OsuAPI:
@@ -68,8 +68,10 @@ class OsuAPI:
         submitted_str = raw.get("ended_at") or raw.get("created_at", "")
         try:
             submitted_at = datetime.fromisoformat(submitted_str.replace("Z", "+00:00"))
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
         except Exception:
-            submitted_at = datetime.utcnow()
+            submitted_at = datetime.now(timezone.utc)
 
         beatmap = raw.get("beatmap", {})
         beatmap_id = beatmap.get("id") or raw.get("beatmap_id", 0)
