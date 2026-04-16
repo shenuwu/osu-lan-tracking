@@ -18,7 +18,16 @@ class Database:
         self.pool = None
 
     async def init(self):
-        self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
+        async def _init_conn(conn):
+            await conn.set_type_codec(
+                "timestamptz",
+                encoder=lambda dt: _ensure_utc(dt).isoformat(),
+                decoder=lambda s: datetime.fromisoformat(s) if isinstance(s, str) else s,
+                schema="pg_catalog",
+                format="text",
+            )
+
+        self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"), init=_init_conn)
         await self.create_tables()
         print("Database verbonden en tabellen aangemaakt")
 
