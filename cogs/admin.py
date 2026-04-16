@@ -15,13 +15,13 @@ SLOT_ORDER = ["NM", "HD", "HR", "DT", "FM", "EX", "TB"]
 
 # Mod-info labels per slot categorie
 SLOT_MOD_LABELS = {
-    "NM": "🎵 ScoreV2 + NoFail verplicht",
-    "HD": "🔵 ScoreV2 + NoFail + Hidden verplicht",
-    "HR": "🔴 ScoreV2 + NoFail + HardRock verplicht",
-    "DT": "⚡ ScoreV2 + NoFail + DoubleTime verplicht",
-    "FM": "🆓 ScoreV2 + NoFail verplicht — overige mods vrij (geen EZ/HT)",
+    "NM": "🎵 ScoreV2 (SM) + NoFail verplicht",
+    "HD": "🔵 ScoreV2 (SM) + NoFail + Hidden verplicht",
+    "HR": "🔴 ScoreV2 (SM) + NoFail + HardRock verplicht",
+    "DT": "⚡ ScoreV2 (SM) + NoFail + DoubleTime verplicht",
+    "FM": "🆓 ScoreV2 (SM) + NoFail verplicht — overige mods vrij (geen EZ/HT)",
     "EX": "🌟 Extra — alles toegestaan",
-    "TB": "🏆 Tiebreaker — ScoreV2 + NoFail, overige mods vrij (geen EZ/HT)",
+    "TB": "🏆 Tiebreaker — ScoreV2 (SM) + NoFail, overige mods vrij (geen EZ/HT)",
 }
 
 def get_slot_category(slot: str) -> str:
