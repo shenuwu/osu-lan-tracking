@@ -51,7 +51,8 @@ class OsuAPI:
     async def get_recent_scores(self, osu_id: int, limit=50):
         return await self.request(f"/users/{osu_id}/scores/recent", params={
             "limit": limit,
-            "include_fails": 1
+            "include_fails": 1,
+            "legacy_only": 0
         })
 
     async def get_beatmap(self, beatmap_id: int):
