@@ -156,7 +156,22 @@ class Database:
                 "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS lan_start_time TIMESTAMPTZ"
             )
             await conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS main_channel_id BIGINT"
+            )
+            await conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS lan_stats_message_id BIGINT"
+            )
+            await conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS pool_lb_message_id BIGINT"
+            )
+            await conn.execute(
                 "ALTER TABLE pools ADD COLUMN IF NOT EXISTS leaderboard_message_id BIGINT"
+            )
+            await conn.execute(
+                "ALTER TABLE pool_maps ADD COLUMN IF NOT EXISTS total_length INT DEFAULT 0"
+            )
+            await conn.execute(
+                "ALTER TABLE scores ADD COLUMN IF NOT EXISTS map_length INT DEFAULT 0"
             )
 
     # ── Players ─────────────────────────────────────────────────────────────
@@ -224,14 +239,14 @@ class Database:
 
     # ── Pool maps ────────────────────────────────────────────────────────────
 
-    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo=0):
+    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo=0, total_length=0):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo, total_length)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (pool_id, beatmap_id) DO UPDATE
-                SET slot=$7, mod_category=$8, max_combo=$9
-            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo)
+                SET slot=$7, mod_category=$8, max_combo=$9, total_length=$10
+            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo, total_length)
 
     async def remove_map_from_pool(self, pool_id, beatmap_id):
         async with self.pool.acquire() as conn:
@@ -254,7 +269,7 @@ class Database:
     async def get_all_pool_map_ids(self):
         """Alle beatmap IDs in alle pools, voor tracking filter."""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT DISTINCT beatmap_id, pool_id, slot, mod_category, max_combo FROM pool_maps")
+            rows = await conn.fetch("SELECT DISTINCT beatmap_id, pool_id, slot, mod_category, max_combo, total_length FROM pool_maps")
             return {r["beatmap_id"]: r for r in rows}
 
     # ── Scores ───────────────────────────────────────────────────────────────
@@ -274,11 +289,11 @@ class Database:
                     count_300, count_100, count_50, count_miss, pp,
                     is_pass, client_type, has_nf,
                     is_pool_score, pool_id, pool_slot,
-                    is_valid, invalid_reason, submitted_at
+                    is_valid, invalid_reason, submitted_at, map_length
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
                     $11,$12,$13,$14,$15,$16,$17,$18,
-                    $19,$20,$21,$22,$23,$24
+                    $19,$20,$21,$22,$23,$24,$25
                 )
                 ON CONFLICT (osu_score_id) DO NOTHING
                 RETURNING id
@@ -293,7 +308,7 @@ class Database:
                 data.get("is_pool_score", False), data.get("pool_id"),
                 data.get("pool_slot"),
                 data.get("is_valid", True), data.get("invalid_reason"),
-                _utc(data["submitted_at"])
+                _utc(data["submitted_at"]), data.get("map_length", 0)
             )
             if row:
                 return row["id"], True
@@ -610,3 +625,62 @@ class Database:
     async def delete_oauth_token(self, discord_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute("DELETE FROM oauth_tokens WHERE discord_id=$1", discord_id)
+
+    async def get_dashboard_stats(self, guild_id: int, since=None):
+        """Alle stats voor het dashboard — globaal."""
+        async with self.pool.acquire() as conn:
+            where = "WHERE s.discord_id IS NOT NULL"
+            args = []
+            if since:
+                where += " AND s.submitted_at >= $1"
+                args.append(since)
+
+            return await conn.fetchrow(f"""
+                SELECT
+                    COUNT(s.id)                                              AS total_scores,
+                    COUNT(s.id) FILTER (WHERE s.is_pass=TRUE)               AS total_passes,
+                    COUNT(s.id) FILTER (WHERE s.count_miss=0 AND s.is_pass=TRUE) AS total_fcs,
+                    COUNT(DISTINCT s.discord_id)                            AS active_players,
+                    AVG(s.accuracy) FILTER (WHERE s.is_pass=TRUE)           AS avg_accuracy,
+                    MAX(s.score)                                             AS top_score,
+                    SUM(s.map_length)                                       AS total_playtime_seconds,
+                    COUNT(s.id) FILTER (WHERE s.is_pool_score=TRUE AND s.is_valid=TRUE) AS pool_scores,
+                    COUNT(DISTINCT CASE WHEN s.is_pool_score AND s.is_valid THEN s.beatmap_id END) AS unique_pool_maps
+                FROM scores s
+                JOIN players p ON p.discord_id = s.discord_id
+                {where}
+            """, *args)
+
+    async def get_dashboard_pool_leaderboards(self, guild_id: int):
+        """Gemiddelde score per speler per pool, voor dashboard embed."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    po.id AS pool_id, po.name AS pool_name,
+                    p.osu_username, p.discord_id,
+                    AVG(pl.score)     AS avg_score,
+                    AVG(pl.accuracy)  AS avg_accuracy,
+                    COUNT(pl.beatmap_id) AS maps_played,
+                    (SELECT COUNT(*) FROM pool_maps WHERE pool_id=po.id) AS maps_total,
+                    SUM(CASE WHEN pl.count_miss=0 THEN 1 ELSE 0 END) AS fc_count
+                FROM pools po
+                JOIN pool_leaderboard pl ON pl.pool_id = po.id
+                JOIN players p ON p.discord_id = pl.discord_id
+                WHERE po.guild_id = $1
+                GROUP BY po.id, po.name, p.osu_username, p.discord_id
+                ORDER BY po.created_at, avg_score DESC
+            """, guild_id)
+
+    async def save_dashboard_messages(self, guild_id: int, stats_msg_id: int, pool_lb_msg_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE guild_settings
+                SET lan_stats_message_id=$2, pool_lb_message_id=$3
+                WHERE guild_id=$1
+            """, guild_id, stats_msg_id, pool_lb_msg_id)
+
+    async def set_main_channel(self, guild_id: int, channel_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE guild_settings SET main_channel_id=$2 WHERE guild_id=$1
+            """, guild_id, channel_id)

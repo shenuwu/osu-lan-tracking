@@ -225,7 +225,8 @@ class AdminCog(commands.Cog):
             pool_id=pool_row["id"], beatmap_id=bm["id"], beatmapset_id=bms.get("id"),
             title=bms.get("title", "?"), artist=bms.get("artist", "?"),
             version=bm.get("version", "?"), slot=slot_clean, mod_category=mod_category,
-            max_combo=bm.get("max_combo") or 0
+            max_combo=bm.get("max_combo") or 0,
+            total_length=bm.get("total_length") or 0
         )
 
         embed = discord.Embed(

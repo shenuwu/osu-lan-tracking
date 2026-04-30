@@ -23,7 +23,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-COGS = ["cogs.admin", "cogs.player", "cogs.stats", "cogs.tracking"]
+COGS = ["cogs.admin", "cogs.player", "cogs.stats", "cogs.tracking", "cogs.dashboard"]
 
 @bot.event
 async def on_ready():

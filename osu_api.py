@@ -269,6 +269,7 @@ class OsuAPI:
             "is_valid":       is_valid,
             "invalid_reason": invalid_reason,
             "submitted_at":   submitted_at,
+            "map_length":     (pool_map.get("total_length") or 0) if pool_map else (beatmap.get("total_length") or 0),
         }
 
     def _calculate_scorev2(self, accuracy: float, max_combo: int, beatmap_max_combo: int) -> int:

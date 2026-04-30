@@ -191,6 +191,7 @@ class TrackingCog(commands.Cog):
                             "pool_slot":    pool_info["slot"],
                             "mod_category": pool_info["mod_category"] or "NM",
                             "max_combo":    pool_info["max_combo"] or 0,
+                            "total_length": pool_info["total_length"] or 0,
                         }
 
                     parsed = self.bot.osu.parse_score(
@@ -221,8 +222,8 @@ class TrackingCog(commands.Cog):
                                 if detail:
                                     real = detail.get("total_score") or detail.get("score") or 0
                                     if real > 0:
-                                        parsed["score"] = real
-                                        logger.info(f"OAuth score: {player['osu_username']} total_score={real}")
+                                        parsed["score"] = real * 2  # NF halveert score, x2 voor max 1M
+                                        logger.info(f"OAuth score: {player['osu_username']} total_score={real} final={real*2}")
                             except Exception as e:
                                 logger.error(f"OAuth score fetch gefaald: {e}")
 
@@ -272,6 +273,10 @@ class TrackingCog(commands.Cog):
 
                         if is_new:
                             await self._update_thread_leaderboard(parsed["pool_id"])
+                            # Dashboard bijwerken
+                            dashboard = self.bot.cogs.get("DashboardCog")
+                            if dashboard:
+                                await dashboard.update_dashboard(guild_id)
 
                 await asyncio.sleep(0.5)
 
