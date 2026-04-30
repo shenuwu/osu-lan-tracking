@@ -1,299 +1,302 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
+from discord.ext import tasks
 import asyncio
 import logging
-import json
 from datetime import datetime, timezone
-from mod_validator import validate_mods
 
 logger = logging.getLogger("tracking")
+
+RANK_EMOJIS = {
+    "XH": "🌟", "X": "⭐", "SH": "💿", "S": "💽",
+    "A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "💀"
+}
+
+MOD_CAT_COLORS = {
+    "NM": 0x88AAFF,
+    "HD": 0xFFDD44,
+    "HR": 0xFF4444,
+    "DT": 0xAA44FF,
+    "FL": 0x333333,
+    "EZ": 0x44BB44,
+}
+
+
+def format_score(score: int) -> str:
+    return f"{score:,}".replace(",", ".")
+
+
+def format_acc(acc: float) -> str:
+    return f"{acc:.2f}%"
 
 
 class TrackingCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self._active_tasks = {}
-        logger.info("[TrackingCog] Cog geladen.")
+        self._tracking_interval = 60
+        self._guild_id = None
+        self._session_id = None
 
-    @property
-    def db(self):
-        return self.bot.db
+    # ── Start / Stop commands ────────────────────────────────────────────────
 
-    @property
-    def osu(self):
-        return self.bot.osu
+    @app_commands.command(name="start_tracking", description="Start het tracken van scores")
+    @app_commands.describe(interval="Poll interval in seconden (standaard 60)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def start_tracking(self, interaction: discord.Interaction, interval: int = 60):
+        await interaction.response.defer(ephemeral=True)
 
-    # ── Discord log channel helper ─────────────────────────────────────
+        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
+        if settings["tracking_active"]:
+            return await interaction.followup.send("⚠️ Tracking is al actief. Gebruik `/stop_tracking` eerst.")
 
-    async def _discord_log(self, guild_id: int, message: str, color: int = 0x6272A4):
-        """Stuur een log embed naar het ingestelde log channel."""
+        players = await self.bot.db.get_all_players()
+        if not players:
+            return await interaction.followup.send("❌ Geen spelers geregistreerd. Voeg eerst spelers toe.")
+
+        self._tracking_interval = max(30, interval)
+        self._guild_id = interaction.guild_id
+
+        session = await self.bot.db.create_tracking_session(
+            guild_id=interaction.guild_id,
+            started_by=interaction.user.id,
+            interval=self._tracking_interval
+        )
+        self._session_id = session["id"]
+
+        await self.bot.db.update_guild_settings(
+            interaction.guild_id,
+            tracking_active=True,
+            tracking_session_id=self._session_id
+        )
+
+        self.tracking_loop.change_interval(seconds=self._tracking_interval)
+        self.tracking_loop.start()
+
+        await interaction.followup.send(
+            f"✅ Tracking gestart! Poll interval: **{self._tracking_interval}s** • "
+            f"{len(players)} spelers bijgehouden."
+        )
+        logger.info(f"Tracking gestart — guild {interaction.guild_id}, interval {self._tracking_interval}s")
+
+    @app_commands.command(name="stop_tracking", description="Stop het tracken van scores")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def stop_tracking(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
+        if not settings["tracking_active"]:
+            return await interaction.followup.send("⚠️ Tracking is al gestopt.")
+
+        if self.tracking_loop.is_running():
+            self.tracking_loop.stop()
+
+        if self._session_id:
+            await self.bot.db.end_tracking_session(self._session_id)
+
+        await self.bot.db.update_guild_settings(
+            interaction.guild_id,
+            tracking_active=False
+        )
+        self._session_id = None
+
+        await interaction.followup.send("✅ Tracking gestopt.")
+        logger.info(f"Tracking gestopt — guild {interaction.guild_id}")
+
+    @app_commands.command(name="force_poll", description="Forceer een directe poll (zonder wachten)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def force_poll(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild_id
+
+        players = await self.bot.db.get_all_players()
+        if not players:
+            return await interaction.followup.send("Geen spelers om te pollen.")
+
+        new_scores = await self._poll_all_players(guild_id, players)
+        await interaction.followup.send(
+            f"✅ Poll klaar — **{new_scores}** nieuwe score(s) gevonden."
+        )
+
+    @app_commands.command(name="test_tracking", description="Test de API verbinding (geen opslag)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def test_tracking(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        players = await self.bot.db.get_all_players()
+        if not players:
+            return await interaction.followup.send("Geen spelers om te testen.")
+
+        test_player = players[0]
+        scores = await self.bot.osu.get_recent_scores(test_player["osu_id"], limit=5)
+
+        if scores is None:
+            return await interaction.followup.send("❌ osu! API niet bereikbaar.")
+
+        embed = discord.Embed(
+            title="🧪 API Test",
+            description=f"Verbinding werkt! Getest op **{test_player['osu_username']}**.",
+            color=0x66FF99
+        )
+        embed.add_field(name="Scores opgehaald", value=str(len(scores)))
+        if scores:
+            s = self.bot.osu.parse_score(scores[0], test_player["osu_id"])
+            embed.add_field(name="Laatste score", value=f"Beatmap `{s['beatmap_id']}` • {s['client_type']} • mods: `{s['mods']}`")
+
+        await interaction.followup.send(embed=embed)
+
+    # ── Background loop ──────────────────────────────────────────────────────
+
+    @tasks.loop(seconds=60)
+    async def tracking_loop(self):
+        if not self._guild_id:
+            return
         try:
-            settings = await self.db.get_guild_settings(guild_id)
-            log_ch_id = settings.get("log_channel_id")
-            if not log_ch_id:
+            players = await self.bot.db.get_all_players()
+            if not players:
                 return
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                return
-            ch = guild.get_channel(log_ch_id)
-            if not ch:
-                return
-            embed = discord.Embed(
-                description=message,
-                color=color,
-                timestamp=datetime.now(timezone.utc)
-            )
-            await ch.send(embed=embed)
+            new = await self._poll_all_players(self._guild_id, players)
+            if new > 0:
+                logger.info(f"Poll: {new} nieuwe score(s)")
         except Exception as e:
-            logger.warning(f"discord_log mislukt: {e}")
+            logger.error(f"Fout in tracking loop: {e}", exc_info=True)
 
-    async def _discord_log_raw_score(self, guild_id: int, username: str, raw: dict, parsed: dict, slot: str = None, is_valid: bool = True, reason: str = None):
-        """Stuur een gedetailleerde raw score dump naar het log channel."""
-        try:
-            settings = await self.db.get_guild_settings(guild_id)
-            log_ch_id = settings.get("log_channel_id")
-            if not log_ch_id:
-                return
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                return
-            ch = guild.get_channel(log_ch_id)
-            if not ch:
-                return
+    @tracking_loop.before_loop
+    async def before_tracking(self):
+        await self.bot.wait_until_ready()
 
-            bm = raw.get("beatmap", {})
-            bms = raw.get("beatmapset", {})
-            stats = raw.get("statistics", {})
-            raw_mods = raw.get("mods", [])
+    # ── Core poll logic ──────────────────────────────────────────────────────
 
-            # Volledige mod dump
-            mod_dump = json.dumps(raw_mods, indent=2) if isinstance(raw_mods, list) else str(raw_mods)
+    async def _poll_all_players(self, guild_id: int, players) -> int:
+        """Poll alle spelers, sla nieuwe scores op, stuur notificaties. Returns # nieuwe scores."""
+        pool_map_index = await self.bot.db.get_all_pool_map_ids()
+        settings = await self.bot.db.get_guild_settings(guild_id)
+        score_channel_id = settings.get("score_channel_id")
+        score_channel = self.bot.get_channel(score_channel_id) if score_channel_id else None
 
-            color = 0x50FA7B if is_valid else 0xFF5555
-            title = f"📥 Nieuwe score: {username}"
-            if slot:
-                title += f" [{slot}]"
-            if not is_valid:
-                title += " ⚠️ ONGELDIG"
-
-            embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
-            embed.add_field(name="Map", value=f"{bms.get('artist','?')} - {bms.get('title','?')} [{bm.get('version','?')}]", inline=False)
-            embed.add_field(name="Score", value=f"`{parsed['score']:,}`", inline=True)
-            embed.add_field(name="Accuracy", value=f"`{parsed['accuracy']:.2f}%`", inline=True)
-            embed.add_field(name="Rank", value=f"`{parsed['rank']}`", inline=True)
-            embed.add_field(name="Combo", value=f"`{parsed['max_combo']}x`", inline=True)
-            embed.add_field(name="Misses", value=f"`{parsed['count_miss']}`", inline=True)
-            embed.add_field(name="Pass", value=f"`{parsed['is_pass']}`", inline=True)
-            embed.add_field(name="Parsed mods", value=f"`{parsed['mods']}`", inline=True)
-            embed.add_field(name="osu_score_id", value=f"`{parsed['osu_score_id']}`", inline=True)
-            embed.add_field(name="beatmap_id", value=f"`{parsed['beatmap_id']}`", inline=True)
-
-            # Raw mods dump (max 1000 chars)
-            mod_str = mod_dump[:500] if len(mod_dump) > 500 else mod_dump
-            embed.add_field(name="Raw mods (API)", value=f"```json\n{mod_str}\n```", inline=False)
-
-            if not is_valid and reason:
-                embed.add_field(name="❌ Reden ongeldig", value=reason, inline=False)
-
-            if slot:
-                embed.add_field(name="Pool slot", value=f"`{slot}`", inline=True)
-
-            await ch.send(embed=embed)
-        except Exception as e:
-            logger.warning(f"discord_log_raw_score mislukt: {e}")
-
-    # ── Tracking loop ──────────────────────────────────────────────────
-
-    async def run_tracking(self, guild_id: int, session_id: int, interval: int, end_after: float = None):
-        logger.info(f"[Tracking] ▶️  Gestart voor guild {guild_id}, sessie {session_id}, interval={interval}s")
-        await self._discord_log(guild_id, f"▶️ **Tracking gestart** — interval: {interval}s, sessie: `{session_id}`", 0x50FA7B)
-
-        start = asyncio.get_event_loop().time()
-        self._active_tasks[guild_id] = asyncio.current_task()
-
-        try:
-            poll_count = 0
-            while True:
-                settings = await self.db.get_guild_settings(guild_id)
-                if not settings["tracking_active"]:
-                    logger.info(f"[Tracking] ⏹️  Gestopt (tracking_active=False) voor guild {guild_id}")
-                    await self._discord_log(guild_id, "⏹️ **Tracking gestopt**", 0xFF5555)
-                    break
-
-                if end_after and (asyncio.get_event_loop().time() - start) >= end_after:
-                    logger.info(f"[Tracking] ⏰ Tijdsframe verstreken voor guild {guild_id}")
-                    await self.db.update_guild_settings(guild_id, tracking_active=False)
-                    await self.db.end_tracking_session(session_id)
-                    await self._discord_log(guild_id, "⏰ **Tracking automatisch gestopt** — tijdsframe verstreken", 0xFFB86C)
-                    guild = self.bot.get_guild(guild_id)
-                    if guild and settings["score_channel_id"]:
-                        ch = guild.get_channel(settings["score_channel_id"])
-                        if ch:
-                            await ch.send("⏹️ **Tracking automatisch gestopt** — tijdsframe verstreken.")
-                    break
-
-                poll_count += 1
-                logger.info(f"[Tracking] 🔄 Poll #{poll_count} voor guild {guild_id}")
-                await self._poll_all_players(guild_id, settings)
-                logger.info(f"[Tracking] ✅ Poll #{poll_count} klaar. Wacht {interval}s...")
-                await asyncio.sleep(interval)
-
-        except asyncio.CancelledError:
-            logger.warning(f"[Tracking] ❌ Task gecancelled voor guild {guild_id}")
-        except Exception as e:
-            logger.exception(f"[Tracking] 💥 Fout voor guild {guild_id}: {e}")
-            await self._discord_log(guild_id, f"💥 **Tracking crash:** `{e}`", 0xFF5555)
-        finally:
-            self._active_tasks.pop(guild_id, None)
-            logger.info(f"[Tracking] Task beëindigd voor guild {guild_id}")
-
-    async def _poll_all_players(self, guild_id: int, settings: dict):
-        players = await self.db.get_all_players()
-        logger.info(f"[Tracking] Polling {len(players)} spelers...")
-
-        guild = self.bot.get_guild(guild_id)
-        score_channel = None
-        if guild and settings.get("score_channel_id"):
-            score_channel = guild.get_channel(settings["score_channel_id"])
-
-        # Pool maps ophalen
-        pools = await self.db.get_all_pools(guild_id)
-        pool_map_ids = set()
-        pool_map_lookup = {}
-        for pool in pools:
-            maps = await self.db.get_pool_maps(pool["id"])
-            for m in maps:
-                pool_map_ids.add(m["beatmap_id"])
-                pool_map_lookup[m["beatmap_id"]] = (pool, m)
-
-        pool_channels_to_refresh = set()
-        new_scores_total = 0
+        total_new = 0
 
         for player in players:
             try:
-                raw_scores = await self.osu.get_recent_scores(player["osu_id"], limit=50)
-                count = len(raw_scores) if raw_scores else 0
-                logger.info(f"[Tracking] {player['osu_username']}: {count} recente scores van API")
-
+                raw_scores = await self.bot.osu.get_recent_scores(player["osu_id"], limit=50)
                 if not raw_scores:
                     continue
 
                 for raw in raw_scores:
-                    parsed = self.osu.parse_score(raw, player["osu_id"], player["discord_id"])
-                    if not parsed["osu_score_id"]:
-                        logger.warning(f"[Tracking] Score zonder ID geskipped voor {player['osu_username']}")
+                    score_id = raw.get("id")
+                    if not score_id:
                         continue
 
-                    exists = await self.db.score_exists(parsed["osu_score_id"])
-                    if exists:
+                    if await self.bot.db.score_exists(score_id):
                         continue
 
-                    # Bepaal of dit een pool map is en valideer mods
-                    bid = parsed["beatmap_id"]
-                    slot = None
-                    is_valid = True
-                    reason = None
+                    beatmap = raw.get("beatmap", {})
+                    beatmap_id = beatmap.get("id") or raw.get("beatmap_id")
 
-                    if bid in pool_map_ids:
-                        pool, m = pool_map_lookup[bid]
-                        slot = m["slot"]
-                        is_valid, reason = validate_mods(parsed["mods"], slot)
-                        logger.info(
-                            f"[Tracking] Pool score: {player['osu_username']} op {slot} "
-                            f"mods={parsed['mods']} valid={is_valid}"
-                            + (f" reden={reason}" if not is_valid else "")
+                    # Check of map in een pool zit
+                    pool_info = pool_map_index.get(beatmap_id)
+                    pool_map = None
+                    if pool_info:
+                        pool_map = {
+                            "pool_id":      pool_info["pool_id"],
+                            "pool_slot":    pool_info["slot"],
+                            "mod_category": pool_info["mod_category"] or "NM",
+                        }
+
+                    parsed = self.bot.osu.parse_score(
+                        raw,
+                        osu_id=player["osu_id"],
+                        discord_id=player["discord_id"],
+                        pool_map=pool_map
+                    )
+
+                    row = await self.bot.db.save_score(parsed)
+                    if not row:
+                        continue
+
+                    total_new += 1
+
+                    # Update pool leaderboard als pool score EN geldig
+                    if parsed["is_pool_score"] and parsed["is_valid"] and parsed["is_pass"]:
+                        improved = await self.bot.db.update_pool_leaderboard(
+                            pool_id=parsed["pool_id"],
+                            beatmap_id=parsed["beatmap_id"],
+                            discord_id=player["discord_id"],
+                            score_row_id=row["id"],
+                            score=parsed["score"],
+                            accuracy=parsed["accuracy"],
+                            mods=parsed["mods"],
+                            rank=parsed["rank"],
+                            count_miss=parsed["count_miss"]
                         )
 
-                    parsed["is_valid"] = is_valid
-                    parsed["invalid_reason"] = reason
-                    await self.db.save_score(parsed)
-                    new_scores_total += 1
-
-                    if not is_valid and bid in pool_map_ids:
-                        async with self.db.pool.acquire() as conn:
-                            await conn.execute(
-                                "UPDATE scores SET is_valid=FALSE, invalid_reason=$1 WHERE osu_score_id=$2",
-                                reason, parsed["osu_score_id"]
+                        if score_channel:
+                            await self._send_pool_score_notification(
+                                score_channel, player, parsed, improved
                             )
-
-                    # Log naar Discord log channel (altijd, voor pool maps)
-                    if bid in pool_map_ids:
-                        await self._discord_log_raw_score(
-                            guild_id, player["osu_username"], raw, parsed,
-                            slot=slot, is_valid=is_valid, reason=reason
+                    elif score_channel and parsed["is_pool_score"] and not parsed["is_valid"]:
+                        # Ongeldig pool score: stuur kleine warning
+                        await self._send_invalid_score_notification(
+                            score_channel, player, parsed
                         )
-                        pool_channels_to_refresh.add((pool["channel_id"], pool["id"], pool["name"]))
 
-                    # Score notificatie in score channel
-                    if score_channel:
-                        await self._post_score_notification(score_channel, parsed, player, raw)
+                await asyncio.sleep(0.5)  # Rate limiting
 
             except Exception as e:
-                logger.exception(f"[Tracking] Fout bij {player['osu_username']}: {e}")
-                await self._discord_log(guild_id, f"⚠️ Fout bij polling **{player['osu_username']}**: `{e}`", 0xFFB86C)
+                logger.error(f"Fout bij pollen van {player['osu_username']}: {e}", exc_info=True)
 
-        logger.info(f"[Tracking] Poll klaar — {new_scores_total} nieuwe scores, {len(pool_channels_to_refresh)} pools refreshen")
+        return total_new
 
-        if new_scores_total > 0:
-            await self._discord_log(
-                guild_id,
-                f"🔄 Poll klaar — **{new_scores_total}** nieuwe score(s) opgeslagen",
-                0x44475A
-            )
+    async def _send_pool_score_notification(self, channel, player, parsed, improved: bool):
+        """Stuur een embed notificatie voor een geldig pool score."""
+        rank_em = RANK_EMOJIS.get(parsed["rank"], "❓")
+        client_badge = "🌐 Lazer" if parsed["client_type"] == "lazer" else "💾 Stable"
+        miss_str = f"{parsed['count_miss']}x miss" if parsed["count_miss"] else "FC ✨"
+        improvement = "🔼 PR!" if improved else "✅ Score geslagen"
 
-        for (ch_id, pool_id, pool_name) in pool_channels_to_refresh:
-            if guild:
-                ch = guild.get_channel_or_thread(ch_id)
-                if ch:
-                    admin_cog = self.bot.get_cog("AdminCog")
-                    if admin_cog:
-                        logger.info(f"[Tracking] Leaderboard refreshen voor pool '{pool_name}'")
-                        await admin_cog._update_pool_leaderboard(ch, pool_id, pool_name)
-
-    async def _post_score_notification(self, channel, score: dict, player, raw: dict):
-        rank_colors = {
-            "SS": 0xFFD700, "X": 0xFFD700, "XH": 0xC0C0C0,
-            "S": 0xFFD700, "SH": 0xC0C0C0,
-            "A": 0x50FA7B, "B": 0x8BE9FD, "C": 0xFFB86C,
-            "D": 0xFF5555, "F": 0x6272A4
-        }
-        rank = score.get("rank", "F")
-        color = rank_colors.get(rank, 0x44475A)
-
-        bm = raw.get("beatmap", {})
-        bms = raw.get("beatmapset", {})
-        title = bms.get("title", "Unknown")
-        artist = bms.get("artist", "Unknown")
-        version = bm.get("version", "Unknown")
-        beatmap_url = f"https://osu.ppy.sh/b/{score['beatmap_id']}"
-
-        mods = f" +{score['mods']}" if score['mods'] != 'NM' else ""
-        passed = "✅" if score["is_pass"] else "❌"
-        valid_warning = (
-            f"\n⚠️ **Telt niet mee:** {score.get('invalid_reason', 'Ongeldige mods')}"
-            if not score.get("is_valid", True) else ""
-        )
+        cat = parsed.get("pool_id")  # we don't have mod_category here directly
+        # Haal mod_category op via pool_slot
+        slot = parsed.get("pool_slot", "")
+        import re
+        match = re.match(r"^([A-Z]+)\d+$", slot.upper())
+        mod_cat = match.group(1) if match else "NM"
+        color = MOD_CAT_COLORS.get(mod_cat, 0xFF66AA)
 
         embed = discord.Embed(
-            title=f"{passed} {player['osu_username']}{mods}",
-            url=beatmap_url,
-            description=f"**{artist} - {title} [{version}]**{valid_warning}",
-            color=color if score.get("is_valid", True) else 0x6272A4
+            title=f"{rank_em} {improvement} — {parsed['mods']}",
+            description=(
+                f"**{player['osu_username']}** op `{slot}`\n"
+                f"{client_badge} • `{format_score(parsed['score'])}` • "
+                f"{format_acc(parsed['accuracy'])} • {miss_str}"
+            ),
+            color=color,
+            url=f"https://osu.ppy.sh/beatmaps/{parsed['beatmap_id']}"
         )
-        embed.add_field(name="Score", value=f"`{score['score']:,}`", inline=True)
-        embed.add_field(name="Accuracy", value=f"`{score['accuracy']:.2f}%`", inline=True)
-        embed.add_field(name="Combo", value=f"`{score['max_combo']}x`", inline=True)
-        embed.add_field(name="Rank", value=f"`{rank}`", inline=True)
-        embed.add_field(name="Misses", value=f"`{score['count_miss']}`", inline=True)
-        if score.get("pp"):
-            embed.add_field(name="PP", value=f"`{score['pp']:.0f}pp`", inline=True)
+        embed.set_footer(text=f"osu! LAN Tracker • {parsed['client_type']}")
 
-        cover = bms.get("covers", {}).get("cover@2x") or bms.get("covers", {}).get("cover")
-        if cover:
-            embed.set_thumbnail(url=cover)
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Kon notificatie niet sturen: {e}")
 
-        embed.set_footer(text=f"osu! LAN Tracker • {score['submitted_at'].strftime('%H:%M:%S')}")
-        await channel.send(embed=embed)
+    async def _send_invalid_score_notification(self, channel, player, parsed):
+        """Stuur een kleine warning voor een ongeldig pool score."""
+        embed = discord.Embed(
+            title=f"⚠️ Ongeldig pool score — {parsed.get('pool_slot', '?')}",
+            description=(
+                f"**{player['osu_username']}** zette een score op een pool map maar die telt **niet** mee.\n"
+                f"Reden: _{parsed.get('invalid_reason', 'onbekend')}_\n"
+                f"Mods gebruikt: `{parsed['mods']}`"
+            ),
+            color=0xFF8800
+        )
+        try:
+            await channel.send(embed=embed)
+        except Exception:
+            pass
+
+    async def cog_unload(self):
+        self.tracking_loop.stop()
 
 
 async def setup(bot):

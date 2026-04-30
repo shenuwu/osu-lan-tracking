@@ -18,8 +18,11 @@ logger = logging.getLogger("bot")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+COGS = ["cogs.admin", "cogs.player", "cogs.stats", "cogs.tracking"]
 
 @bot.event
 async def on_ready():
@@ -36,8 +39,6 @@ async def on_error(event, *args, **kwargs):
 
 async def main():
     async with bot:
-        # DB en osu API initialiseren VOOR cogs laden
-        # zodat autocomplete en alle cogs bot.db direct kunnen gebruiken
         logger.info("Database initialiseren...")
         bot.db = Database()
         await bot.db.init()
@@ -47,14 +48,9 @@ async def main():
         await bot.osu.get_token()
 
         logger.info("Extensions laden...")
-        await bot.load_extension("cogs.admin")
-        logger.info("cogs.admin geladen")
-        await bot.load_extension("cogs.player")
-        logger.info("cogs.player geladen")
-        await bot.load_extension("cogs.stats")
-        logger.info("cogs.stats geladen")
-        await bot.load_extension("cogs.tracking")
-        logger.info("cogs.tracking geladen")
+        for cog in COGS:
+            await bot.load_extension(cog)
+            logger.info(f"{cog} geladen")
 
         logger.info("Bot wordt gestart...")
         await bot.start(os.getenv("DISCORD_TOKEN"))

@@ -1,80 +1,344 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
+from datetime import datetime, timezone
+
+
+RANK_EMOJIS = {
+    "XH": "🌟", "X": "⭐",
+    "SH": "💿", "S": "💽",
+    "A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "💀"
+}
+
+MOD_COLORS = {
+    "NM": 0x88AAFF,
+    "HD": 0xFFDD44,
+    "HR": 0xFF4444,
+    "DT": 0xAA44FF,
+    "FL": 0x333333,
+}
+
+
+def rank_emoji(rank: str) -> str:
+    return RANK_EMOJIS.get(rank.upper() if rank else "F", "❓")
+
+
+def format_score(score: int) -> str:
+    return f"{score:,}".replace(",", ".")
+
+
+def format_acc(acc: float) -> str:
+    return f"{acc:.2f}%"
+
+
+def client_badge(client_type: str) -> str:
+    return "🌐 Lazer" if client_type == "lazer" else "💾 Stable"
 
 
 class PlayerCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @property
-    def db(self):
-        return self.bot.db
+    # ── Registratie ──────────────────────────────────────────────────────────
 
-    @property
-    def osu(self):
-        return self.bot.osu
-
-    @app_commands.command(name="register", description="Koppel je Discord account aan je osu! account voor de LAN tracker")
+    @app_commands.command(name="register", description="Koppel je Discord aan je osu! account")
     @app_commands.describe(osu_username="Je osu! gebruikersnaam")
     async def register(self, interaction: discord.Interaction, osu_username: str):
         await interaction.response.defer(ephemeral=True)
-        user_data = await self.osu.get_user(osu_username)
-        if not user_data:
-            return await interaction.followup.send(f"❌ osu! gebruiker `{osu_username}` niet gevonden.", ephemeral=True)
 
-        await self.db.add_player(interaction.user.id, user_data["username"], user_data["id"], interaction.user.id)
+        user = await self.bot.osu.get_user(osu_username)
+        if not user:
+            return await interaction.followup.send(f"❌ osu! gebruiker `{osu_username}` niet gevonden.")
 
+        await self.bot.db.add_player(
+            discord_id=interaction.user.id,
+            osu_username=user["username"],
+            osu_id=user["id"],
+            added_by=interaction.user.id
+        )
         embed = discord.Embed(
             title="✅ Geregistreerd!",
-            description=f"Je Discord is nu gekoppeld aan **{user_data['username']}**",
-            color=0x50FA7B
+            description=f"Je bent nu gekoppeld als **{user['username']}**.",
+            color=0x66FF99
         )
-        embed.set_thumbnail(url=f"https://s.ppy.sh/a/{user_data['id']}")
-        embed.add_field(name="osu! Rank", value=f"#{user_data.get('statistics', {}).get('global_rank', 'N/A'):,}" if user_data.get('statistics', {}).get('global_rank') else "N/A", inline=True)
-        embed.add_field(name="PP", value=f"{user_data.get('statistics', {}).get('pp', 0):.0f}pp", inline=True)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_thumbnail(url=user.get("avatar_url", ""))
+        embed.add_field(name="osu! ID", value=str(user["id"]))
+        embed.add_field(name="Rank", value=f"#{user.get('statistics', {}).get('global_rank', '?'):,}" if user.get('statistics', {}).get('global_rank') else "Unranked")
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="unregister", description="Verwijder jezelf uit de LAN tracker")
     async def unregister(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        player = await self.db.get_player(interaction.user.id)
-        if not player:
-            return await interaction.followup.send("❌ Je bent niet geregistreerd.", ephemeral=True)
-        await self.db.remove_player(interaction.user.id)
-        await interaction.followup.send(f"✅ Je account (**{player['osu_username']}**) is verwijderd uit de tracker.", ephemeral=True)
+        result = await self.bot.db.remove_player(interaction.user.id)
+        if result == "DELETE 0":
+            return await interaction.response.send_message("❌ Je staat niet in de tracker.", ephemeral=True)
+        await interaction.response.send_message("✅ Je bent verwijderd uit de tracker.", ephemeral=True)
 
-    @app_commands.command(name="profile", description="Bekijk je eigen LAN stats")
-    async def profile(self, interaction: discord.Interaction):
+    # ── Profiel ──────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="profile", description="Bekijk LAN stats van een speler")
+    @app_commands.describe(member="Laat leeg voor je eigen profiel")
+    async def profile(self, interaction: discord.Interaction, member: discord.Member = None):
         await interaction.response.defer()
-        player = await self.db.get_player(interaction.user.id)
+        target = member or interaction.user
+
+        player = await self.bot.db.get_player(target.id)
         if not player:
-            return await interaction.followup.send("❌ Je bent niet geregistreerd. Gebruik `/register` eerst.")
+            name = "Je bent" if not member else f"{target.display_name} is"
+            return await interaction.followup.send(f"❌ {name} niet geregistreerd. Gebruik `/register`.")
 
-        scores = await self.db.get_player_stats(interaction.user.id)
-        if not scores:
-            return await interaction.followup.send(f"Geen scores gevonden voor **{player['osu_username']}** op deze LAN.")
+        stats = await self.bot.db.get_player_stats_summary(target.id)
+        pool_summary = await self.bot.db.get_player_pool_summary(target.id, interaction.guild_id)
 
-        passed = [s for s in scores if s["is_pass"]]
-        avg_acc = sum(s["accuracy"] for s in passed) / len(passed) if passed else 0
-        top_score = max((s["score"] for s in passed), default=0)
-        total_score = sum(s["score"] for s in scores)
-        fc_count = sum(1 for s in passed if s["count_miss"] == 0)
-        s_count = sum(1 for s in passed if s["rank"] in ("S", "SS", "X", "XH", "SH"))
+        osu_user = await self.bot.osu.get_user_by_id(player["osu_id"])
+        global_rank = osu_user.get("statistics", {}).get("global_rank") if osu_user else None
 
         embed = discord.Embed(
-            title=f"🎮 {player['osu_username']} — LAN Profiel",
-            color=0xBD93F9
+            title=f"🎮 {player['osu_username']}",
+            url=f"https://osu.ppy.sh/users/{player['osu_id']}",
+            color=0xFF66AA
         )
-        embed.set_thumbnail(url=f"https://s.ppy.sh/a/{player['osu_id']}")
-        embed.add_field(name="Maps gespeeld", value=str(len(scores)), inline=True)
-        embed.add_field(name="Passes", value=str(len(passed)), inline=True)
-        embed.add_field(name="Gem. Accuracy", value=f"{avg_acc:.2f}%", inline=True)
-        embed.add_field(name="Top Score", value=f"`{top_score:,}`", inline=True)
-        embed.add_field(name="Totaal Score", value=f"`{total_score:,}`", inline=True)
-        embed.add_field(name="FC's", value=str(fc_count), inline=True)
-        embed.add_field(name="S+ Ranks", value=str(s_count), inline=True)
-        embed.set_footer(text="osu! LAN Tracker")
+        if osu_user:
+            embed.set_thumbnail(url=osu_user.get("avatar_url", ""))
+
+        embed.add_field(
+            name="osu! rank",
+            value=f"#{global_rank:,}" if global_rank else "Unranked",
+            inline=True
+        )
+        embed.add_field(
+            name="Scores bijgehouden",
+            value=f"🌐 Lazer: **{stats['lazer_scores']}**\n💾 Stable: **{stats['stable_scores']}**",
+            inline=True
+        )
+        embed.add_field(
+            name="Pool scores",
+            value=str(stats["pool_scores"] or 0),
+            inline=True
+        )
+        embed.add_field(
+            name="Gem. accuracy",
+            value=format_acc(stats["avg_accuracy"]) if stats["avg_accuracy"] else "—",
+            inline=True
+        )
+        embed.add_field(
+            name="FC's",
+            value=str(stats["fc_count"] or 0),
+            inline=True
+        )
+        embed.add_field(
+            name="Pass rate",
+            value=f"{stats['pass_count']}/{stats['total_scores']}" if stats["total_scores"] else "—",
+            inline=True
+        )
+
+        if pool_summary:
+            pool_lines = []
+            for ps in pool_summary:
+                bar_done = ps["maps_done"] or 0
+                bar_total = ps["maps_total"] or 0
+                pct = int((bar_done / bar_total * 10)) if bar_total > 0 else 0
+                bar = "█" * pct + "░" * (10 - pct)
+                pool_lines.append(
+                    f"**{ps['pool_name']}**: `{bar}` {bar_done}/{bar_total}"
+                    + (f" — {format_score(ps['total_score'])} pts" if ps["total_score"] else "")
+                )
+            embed.add_field(
+                name="📋 Pool voortgang",
+                value="\n".join(pool_lines) or "Geen pool scores",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Discord: {target.display_name}")
+        await interaction.followup.send(embed=embed)
+
+    # ── Recent scores ────────────────────────────────────────────────────────
+
+    @app_commands.command(name="recent", description="Bekijk recente scores")
+    @app_commands.describe(
+        member="Laat leeg voor jezelf",
+        limit="Aantal scores (max 10)",
+        client="Alleen stable, lazer, of alles"
+    )
+    @app_commands.choices(client=[
+        app_commands.Choice(name="Alles", value="all"),
+        app_commands.Choice(name="Lazer", value="lazer"),
+        app_commands.Choice(name="Stable", value="stable"),
+    ])
+    async def recent(self, interaction: discord.Interaction,
+                     member: discord.Member = None,
+                     limit: int = 5,
+                     client: str = "all"):
+        await interaction.response.defer()
+        target = member or interaction.user
+        limit = min(max(limit, 1), 10)
+
+        player = await self.bot.db.get_player(target.id)
+        if not player:
+            return await interaction.followup.send(f"❌ {target.display_name} is niet geregistreerd.")
+
+        client_filter = None if client == "all" else client
+        scores = await self.bot.db.get_player_all_scores(target.id, limit=limit, client_type=client_filter)
+
+        if not scores:
+            return await interaction.followup.send(f"Geen scores gevonden voor **{player['osu_username']}**.")
+
+        embed = discord.Embed(
+            title=f"🕐 Recente scores — {player['osu_username']}",
+            color=0x88AAFF
+        )
+
+        for s in scores:
+            title = s.get("title") or f"Beatmap {s['beatmap_id']}"
+            slot_info = f" `{s['slot']}`" if s.get("slot") else ""
+            nf_badge = " `NF`" if s["has_nf"] else ""
+            pool_badge = " 🎱" if s["is_pool_score"] else ""
+            valid_badge = "" if s["is_valid"] else " ⚠️"
+            
+            embed.add_field(
+                name=f"{rank_emoji(s['rank'])} {title}{slot_info}{pool_badge}{valid_badge}",
+                value=(
+                    f"{client_badge(s['client_type'])}{nf_badge} • "
+                    f"`{s['mods'] or 'NM'}` • "
+                    f"**{format_score(s['score'])}** • "
+                    f"{format_acc(s['accuracy'])} • "
+                    f"{s['count_miss']}x miss"
+                    + (f"\n⚠️ _{s['invalid_reason']}_" if not s["is_valid"] and s.get("invalid_reason") else "")
+                ),
+                inline=False
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    # ── Pool scores ──────────────────────────────────────────────────────────
+
+    @app_commands.command(name="pool_scores", description="Jouw scores in een specifieke pool")
+    @app_commands.describe(
+        pool_channel="Het pool channel",
+        member="Laat leeg voor jezelf"
+    )
+    async def pool_scores(self, interaction: discord.Interaction,
+                          pool_channel: discord.TextChannel,
+                          member: discord.Member = None):
+        await interaction.response.defer()
+        target = member or interaction.user
+
+        player = await self.bot.db.get_player(target.id)
+        if not player:
+            return await interaction.followup.send(f"❌ {target.display_name} is niet geregistreerd.")
+
+        pool = await self.bot.db.get_pool_by_channel(pool_channel.id)
+        if not pool:
+            return await interaction.followup.send("❌ Dit channel is geen pool.")
+
+        scores = await self.bot.db.get_player_pool_scores(target.id, pool["id"])
+        maps = await self.bot.db.get_pool_maps(pool["id"])
+        total_maps = len(maps)
+
+        embed = discord.Embed(
+            title=f"🎵 {pool['name']} — {player['osu_username']}",
+            color=0xFF66AA
+        )
+        embed.set_footer(text=f"{len(scores)}/{total_maps} maps gespeeld")
+
+        if not scores:
+            embed.description = "Nog geen geldige scores in deze pool."
+        else:
+            # Groepeer op mod_category
+            by_cat = {}
+            for s in scores:
+                cat = s["mod_category"] or "?"
+                by_cat.setdefault(cat, []).append(s)
+
+            for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
+                if cat not in by_cat:
+                    continue
+                lines = []
+                for s in sorted(by_cat[cat], key=lambda x: x["slot"]):
+                    lines.append(
+                        f"`{s['slot']}` {rank_emoji(s['rank'])} "
+                        f"**{format_score(s['score'])}** • {format_acc(s['accuracy'])} • "
+                        f"{s['count_miss']}x miss • `{s['mods']}`"
+                    )
+                embed.add_field(name=cat, value="\n".join(lines), inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+    # ── Compare ──────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="compare", description="Vergelijk jouw pool scores met iemand anders")
+    @app_commands.describe(member="De speler om mee te vergelijken")
+    async def compare(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+
+        player_a = await self.bot.db.get_player(interaction.user.id)
+        player_b = await self.bot.db.get_player(member.id)
+
+        if not player_a:
+            return await interaction.followup.send("❌ Jij bent niet geregistreerd.")
+        if not player_b:
+            return await interaction.followup.send(f"❌ {member.display_name} is niet geregistreerd.")
+
+        comparisons = await self.bot.db.compare_players(
+            interaction.user.id, member.id, interaction.guild_id
+        )
+
+        if not comparisons:
+            return await interaction.followup.send("Geen pool scores gevonden om te vergelijken.")
+
+        wins_a = wins_b = ties = 0
+        lines = []
+        for row in comparisons:
+            sa = row["score_a"]
+            sb = row["score_b"]
+            aa = row["acc_a"]
+            ab = row["acc_b"]
+
+            if sa and sb:
+                if sa > sb:
+                    indicator = "🔴"  # A wint
+                    wins_a += 1
+                elif sb > sa:
+                    indicator = "🔵"  # B wint
+                    wins_b += 1
+                else:
+                    indicator = "⚫"
+                    ties += 1
+            elif sa:
+                indicator = "🔴"
+                wins_a += 1
+            elif sb:
+                indicator = "🔵"
+                wins_b += 1
+            else:
+                indicator = "⬜"
+
+            title_short = row["title"][:25] + "…" if len(row["title"] or "") > 25 else row["title"] or "?"
+            sa_str = format_score(sa) if sa else "—"
+            sb_str = format_score(sb) if sb else "—"
+            aa_str = format_acc(aa) if aa else "—"
+            ab_str = format_acc(ab) if ab else "—"
+
+            lines.append(
+                f"{indicator} `{row['slot']}` **{title_short}**\n"
+                f"  🔴 {sa_str} ({aa_str}) vs 🔵 {sb_str} ({ab_str})"
+            )
+
+        embed = discord.Embed(
+            title=f"⚔️ {player_a['osu_username']} vs {player_b['osu_username']}",
+            description="\n".join(lines[:15]),  # max 15 zodat embed niet te lang is
+            color=0xFFAA33
+        )
+        embed.add_field(
+            name="Resultaat",
+            value=(
+                f"🔴 **{player_a['osu_username']}**: {wins_a} wins\n"
+                f"🔵 **{player_b['osu_username']}**: {wins_b} wins\n"
+                f"⚫ Gelijk: {ties}"
+            )
+        )
+        if len(lines) > 15:
+            embed.set_footer(text=f"Toont 15/{len(lines)} maps")
+
         await interaction.followup.send(embed=embed)
 
 

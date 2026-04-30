@@ -3,14 +3,11 @@ import os
 from datetime import datetime, timezone
 
 
-
-def _ensure_utc(dt: datetime) -> datetime:
-    """Convert to naive UTC datetime, which is what asyncpg expects for TIMESTAMPTZ columns."""
+def _utc(dt: datetime) -> datetime:
     if dt is None:
         return datetime.utcnow()
     if dt.tzinfo is None:
-        return dt  # already naive UTC
-    # Convert aware datetime to naive UTC
+        return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
@@ -20,90 +17,132 @@ class Database:
 
     async def init(self):
         self.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
-        await self.create_tables()
+        await self._create_tables()
         print("Database verbonden en tabellen aangemaakt")
 
-    async def create_tables(self):
+    async def _create_tables(self):
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS players (
-                    discord_id BIGINT PRIMARY KEY,
+                    discord_id   BIGINT PRIMARY KEY,
                     osu_username TEXT NOT NULL,
-                    osu_id BIGINT NOT NULL UNIQUE,
-                    added_by BIGINT,
-                    added_at TIMESTAMPTZ DEFAULT NOW()
+                    osu_id       BIGINT NOT NULL UNIQUE,
+                    added_by     BIGINT,
+                    added_at     TIMESTAMPTZ DEFAULT NOW()
                 );
 
                 CREATE TABLE IF NOT EXISTS pools (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
+                    id         SERIAL PRIMARY KEY,
+                    name       TEXT NOT NULL,
                     channel_id BIGINT UNIQUE,
-                    guild_id BIGINT NOT NULL,
+                    guild_id   BIGINT NOT NULL,
                     created_by BIGINT,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
-                    active BOOLEAN DEFAULT TRUE
+                    active     BOOLEAN DEFAULT TRUE
                 );
 
+                -- Elke map in een pool, met de vereiste mod categorie (NM/HD/HR/DT)
                 CREATE TABLE IF NOT EXISTS pool_maps (
-                    id SERIAL PRIMARY KEY,
-                    pool_id INT REFERENCES pools(id) ON DELETE CASCADE,
-                    beatmap_id BIGINT NOT NULL,
+                    id            SERIAL PRIMARY KEY,
+                    pool_id       INT REFERENCES pools(id) ON DELETE CASCADE,
+                    beatmap_id    BIGINT NOT NULL,
                     beatmapset_id BIGINT,
-                    title TEXT,
-                    artist TEXT,
-                    version TEXT,
-                    slot TEXT,
+                    title         TEXT,
+                    artist        TEXT,
+                    version       TEXT,
+                    slot          TEXT,   -- bijv. NM1, HD2, HR1, DT3
+                    mod_category  TEXT,   -- NM, HD, HR, DT
                     UNIQUE(pool_id, beatmap_id)
                 );
 
+                -- Alle scores (stable + lazer), raw opgeslagen
                 CREATE TABLE IF NOT EXISTS scores (
-                    id SERIAL PRIMARY KEY,
-                    osu_score_id BIGINT UNIQUE NOT NULL,
-                    osu_id BIGINT NOT NULL,
-                    discord_id BIGINT REFERENCES players(discord_id),
-                    beatmap_id BIGINT NOT NULL,
-                    score BIGINT NOT NULL,
-                    accuracy FLOAT NOT NULL,
-                    max_combo INT NOT NULL,
-                    mods TEXT DEFAULT 'NM',
-                    rank TEXT,
-                    count_300 INT DEFAULT 0,
-                    count_100 INT DEFAULT 0,
-                    count_50 INT DEFAULT 0,
-                    count_miss INT DEFAULT 0,
-                    pp FLOAT DEFAULT 0,
-                    is_pass BOOLEAN DEFAULT TRUE,
-                    is_valid BOOLEAN DEFAULT TRUE,
+                    id            SERIAL PRIMARY KEY,
+                    osu_score_id  BIGINT UNIQUE NOT NULL,
+                    osu_id        BIGINT NOT NULL,
+                    discord_id    BIGINT REFERENCES players(discord_id),
+                    beatmap_id    BIGINT NOT NULL,
+                    score         BIGINT NOT NULL,
+                    accuracy      FLOAT NOT NULL,
+                    max_combo     INT NOT NULL,
+                    mods          TEXT DEFAULT 'NM',
+                    mods_list     TEXT DEFAULT '[]',   -- JSON array van mod acronyms
+                    rank          TEXT,
+                    count_300     INT DEFAULT 0,
+                    count_100     INT DEFAULT 0,
+                    count_50      INT DEFAULT 0,
+                    count_miss    INT DEFAULT 0,
+                    pp            FLOAT DEFAULT 0,
+                    is_pass       BOOLEAN DEFAULT TRUE,
+                    client_type   TEXT DEFAULT 'stable',  -- 'stable' of 'lazer'
+                    has_nf        BOOLEAN DEFAULT FALSE,
+                    is_pool_score BOOLEAN DEFAULT FALSE,  -- zit deze map in een pool?
+                    pool_id       INT REFERENCES pools(id),
+                    pool_slot     TEXT,
+                    is_valid      BOOLEAN DEFAULT TRUE,
                     invalid_reason TEXT,
-                    submitted_at TIMESTAMPTZ NOT NULL,
-                    tracked_at TIMESTAMPTZ DEFAULT NOW()
+                    submitted_at  TIMESTAMPTZ NOT NULL,
+                    tracked_at    TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                -- Beste pool score per speler per map (voor live leaderboard)
+                CREATE TABLE IF NOT EXISTS pool_leaderboard (
+                    id         SERIAL PRIMARY KEY,
+                    pool_id    INT REFERENCES pools(id) ON DELETE CASCADE,
+                    beatmap_id BIGINT NOT NULL,
+                    discord_id BIGINT REFERENCES players(discord_id),
+                    score_id   INT REFERENCES scores(id),
+                    score      BIGINT NOT NULL,
+                    accuracy   FLOAT NOT NULL,
+                    mods       TEXT,
+                    rank       TEXT,
+                    count_miss INT DEFAULT 0,
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(pool_id, beatmap_id, discord_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS tracking_sessions (
-                    id SERIAL PRIMARY KEY,
-                    guild_id BIGINT NOT NULL,
-                    started_by BIGINT,
-                    start_time TIMESTAMPTZ NOT NULL,
-                    end_time TIMESTAMPTZ,
+                    id               SERIAL PRIMARY KEY,
+                    guild_id         BIGINT NOT NULL,
+                    started_by       BIGINT,
+                    start_time       TIMESTAMPTZ NOT NULL,
+                    end_time         TIMESTAMPTZ,
                     interval_seconds INT DEFAULT 60,
-                    is_test BOOLEAN DEFAULT FALSE,
-                    active BOOLEAN DEFAULT TRUE
+                    active           BOOLEAN DEFAULT TRUE
                 );
 
                 CREATE TABLE IF NOT EXISTS guild_settings (
-                    guild_id BIGINT PRIMARY KEY,
-                    log_channel_id BIGINT,
-                    score_channel_id BIGINT,
-                    tracking_active BOOLEAN DEFAULT FALSE,
+                    guild_id            BIGINT PRIMARY KEY,
+                    score_channel_id    BIGINT,
+                    log_channel_id      BIGINT,
+                    tracking_active     BOOLEAN DEFAULT FALSE,
                     tracking_session_id INT REFERENCES tracking_sessions(id)
                 );
             """)
-            # Migraties voor bestaande databases
-            await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS is_valid BOOLEAN DEFAULT TRUE")
-            await conn.execute("ALTER TABLE scores ADD COLUMN IF NOT EXISTS invalid_reason TEXT")
-            await conn.execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT")
 
-    # --- Players ---
+            # Migraties voor bestaande databases
+            for col, definition in [
+                ("client_type",    "TEXT DEFAULT 'stable'"),
+                ("has_nf",         "BOOLEAN DEFAULT FALSE"),
+                ("mods_list",      "TEXT DEFAULT '[]'"),
+                ("is_pool_score",  "BOOLEAN DEFAULT FALSE"),
+                ("pool_id",        "INT"),
+                ("pool_slot",      "TEXT"),
+                ("is_valid",       "BOOLEAN DEFAULT TRUE"),
+                ("invalid_reason", "TEXT"),
+            ]:
+                await conn.execute(
+                    f"ALTER TABLE scores ADD COLUMN IF NOT EXISTS {col} {definition}"
+                )
+            await conn.execute(
+                "ALTER TABLE pool_maps ADD COLUMN IF NOT EXISTS mod_category TEXT"
+            )
+            await conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT"
+            )
+
+    # ── Players ─────────────────────────────────────────────────────────────
+
     async def add_player(self, discord_id, osu_username, osu_id, added_by=None):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -129,7 +168,8 @@ class Database:
         async with self.pool.acquire() as conn:
             return await conn.fetch("SELECT * FROM players ORDER BY osu_username")
 
-    # --- Pools ---
+    # ── Pools ────────────────────────────────────────────────────────────────
+
     async def create_pool(self, name, channel_id, guild_id, created_by):
         async with self.pool.acquire() as conn:
             return await conn.fetchrow("""
@@ -137,6 +177,10 @@ class Database:
                 VALUES ($1, $2, $3, $4)
                 RETURNING *
             """, name, channel_id, guild_id, created_by)
+
+    async def delete_pool(self, pool_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pools WHERE id=$1", pool_id)
 
     async def get_pool_by_channel(self, channel_id):
         async with self.pool.acquire() as conn:
@@ -148,96 +192,252 @@ class Database:
 
     async def get_all_pools(self, guild_id):
         async with self.pool.acquire() as conn:
-            return await conn.fetch("SELECT * FROM pools WHERE guild_id=$1 ORDER BY created_at", guild_id)
+            return await conn.fetch(
+                "SELECT * FROM pools WHERE guild_id=$1 ORDER BY created_at", guild_id
+            )
 
-    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot):
+    # ── Pool maps ────────────────────────────────────────────────────────────
+
+    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (pool_id, beatmap_id) DO NOTHING
-            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot)
-
-    async def get_pool_maps(self, pool_id):
-        async with self.pool.acquire() as conn:
-            return await conn.fetch("SELECT * FROM pool_maps WHERE pool_id=$1 ORDER BY slot", pool_id)
+                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (pool_id, beatmap_id) DO UPDATE
+                SET slot=$7, mod_category=$8
+            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category)
 
     async def remove_map_from_pool(self, pool_id, beatmap_id):
         async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM pool_maps WHERE pool_id=$1 AND beatmap_id=$2", pool_id, beatmap_id)
+            await conn.execute(
+                "DELETE FROM pool_maps WHERE pool_id=$1 AND beatmap_id=$2", pool_id, beatmap_id
+            )
 
-    # --- Scores ---
-    async def save_score(self, score_data: dict):
+    async def get_pool_maps(self, pool_id):
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO scores (osu_score_id, osu_id, discord_id, beatmap_id, score,
-                    accuracy, max_combo, mods, rank, count_300, count_100, count_50,
-                    count_miss, pp, is_pass, is_valid, invalid_reason, submitted_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-                ON CONFLICT (osu_score_id) DO NOTHING
-            """,
-            score_data["osu_score_id"], score_data["osu_id"], score_data.get("discord_id"),
-            score_data["beatmap_id"], score_data["score"], score_data["accuracy"],
-            score_data["max_combo"], score_data["mods"], score_data["rank"],
-            score_data["count_300"], score_data["count_100"], score_data["count_50"],
-            score_data["count_miss"], score_data.get("pp", 0), score_data["is_pass"],
-            score_data.get("is_valid", True), score_data.get("invalid_reason"),
-            _ensure_utc(score_data["submitted_at"]))
+            return await conn.fetch(
+                "SELECT * FROM pool_maps WHERE pool_id=$1 ORDER BY mod_category, slot", pool_id
+            )
+
+    async def get_pool_map(self, pool_id, beatmap_id):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT * FROM pool_maps WHERE pool_id=$1 AND beatmap_id=$2", pool_id, beatmap_id
+            )
+
+    async def get_all_pool_map_ids(self):
+        """Alle beatmap IDs in alle pools, voor tracking filter."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT DISTINCT beatmap_id, pool_id, slot, mod_category FROM pool_maps")
+            return {r["beatmap_id"]: r for r in rows}
+
+    # ── Scores ───────────────────────────────────────────────────────────────
 
     async def score_exists(self, osu_score_id):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT id FROM scores WHERE osu_score_id=$1", osu_score_id)
             return row is not None
 
-    async def get_player_stats(self, discord_id, since: datetime = None):
+    async def save_score(self, data: dict):
         async with self.pool.acquire() as conn:
-            base = "SELECT * FROM scores WHERE discord_id=$1"
-            args = [discord_id]
-            if since:
-                base += " AND submitted_at >= $2"
-                args.append(since)
-            return await conn.fetch(base + " ORDER BY submitted_at DESC", *args)
+            row = await conn.fetchrow("""
+                INSERT INTO scores (
+                    osu_score_id, osu_id, discord_id, beatmap_id,
+                    score, accuracy, max_combo, mods, mods_list, rank,
+                    count_300, count_100, count_50, count_miss, pp,
+                    is_pass, client_type, has_nf,
+                    is_pool_score, pool_id, pool_slot,
+                    is_valid, invalid_reason, submitted_at
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                    $11,$12,$13,$14,$15,$16,$17,$18,
+                    $19,$20,$21,$22,$23,$24
+                )
+                ON CONFLICT (osu_score_id) DO NOTHING
+                RETURNING id
+            """,
+                data["osu_score_id"], data["osu_id"], data.get("discord_id"),
+                data["beatmap_id"], data["score"], data["accuracy"],
+                data["max_combo"], data["mods"], data.get("mods_list", "[]"),
+                data["rank"], data["count_300"], data["count_100"],
+                data["count_50"], data["count_miss"], data.get("pp", 0),
+                data["is_pass"], data.get("client_type", "stable"),
+                data.get("has_nf", False),
+                data.get("is_pool_score", False), data.get("pool_id"),
+                data.get("pool_slot"),
+                data.get("is_valid", True), data.get("invalid_reason"),
+                _utc(data["submitted_at"])
+            )
+            return row
+
+    async def update_pool_leaderboard(self, pool_id, beatmap_id, discord_id, score_row_id, score, accuracy, mods, rank, count_miss):
+        """Vervang leaderboard entry als de nieuwe score hoger is."""
+        async with self.pool.acquire() as conn:
+            existing = await conn.fetchrow("""
+                SELECT id, score FROM pool_leaderboard
+                WHERE pool_id=$1 AND beatmap_id=$2 AND discord_id=$3
+            """, pool_id, beatmap_id, discord_id)
+
+            if existing is None:
+                await conn.execute("""
+                    INSERT INTO pool_leaderboard
+                        (pool_id, beatmap_id, discord_id, score_id, score, accuracy, mods, rank, count_miss)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                """, pool_id, beatmap_id, discord_id, score_row_id, score, accuracy, mods, rank, count_miss)
+                return True  # nieuw
+            elif score > existing["score"]:
+                await conn.execute("""
+                    UPDATE pool_leaderboard
+                    SET score_id=$4, score=$5, accuracy=$6, mods=$7, rank=$8, count_miss=$9, updated_at=NOW()
+                    WHERE pool_id=$1 AND beatmap_id=$2 AND discord_id=$3
+                """, pool_id, beatmap_id, discord_id, score_row_id, score, accuracy, mods, rank, count_miss)
+                return True  # verbeterd
+            return False  # niet verbeterd
+
+    # ── Leaderboard queries ──────────────────────────────────────────────────
 
     async def get_pool_leaderboard(self, pool_id):
+        """Per map: alle spelers gesorteerd op score, alleen hun beste."""
         async with self.pool.acquire() as conn:
             return await conn.fetch("""
-                SELECT s.*, p.osu_username, pm.title, pm.artist, pm.version, pm.slot
-                FROM scores s
-                JOIN players p ON p.discord_id = s.discord_id
-                JOIN pool_maps pm ON pm.beatmap_id = s.beatmap_id
-                WHERE pm.pool_id = $1 AND s.is_pass = TRUE AND s.is_valid = TRUE
-                ORDER BY pm.slot, s.score DESC
+                SELECT
+                    pl.beatmap_id, pl.score, pl.accuracy, pl.mods, pl.rank, pl.count_miss,
+                    pl.updated_at,
+                    p.osu_username, p.discord_id,
+                    pm.title, pm.artist, pm.version, pm.slot, pm.mod_category
+                FROM pool_leaderboard pl
+                JOIN players p ON p.discord_id = pl.discord_id
+                JOIN pool_maps pm ON pm.pool_id = pl.pool_id AND pm.beatmap_id = pl.beatmap_id
+                WHERE pl.pool_id = $1
+                ORDER BY pm.mod_category, pm.slot, pl.score DESC
             """, pool_id)
 
-    async def get_global_leaderboard(self, guild_id, since: datetime = None):
+    async def get_map_leaderboard(self, pool_id, beatmap_id):
+        """Leaderboard van 1 specifieke map."""
         async with self.pool.acquire() as conn:
-            query = """
-                SELECT p.osu_username, p.discord_id,
-                    COUNT(s.id) as maps_played,
-                    AVG(s.accuracy) as avg_accuracy,
-                    MAX(s.score) as top_score,
-                    SUM(s.score) as total_score,
-                    AVG(s.max_combo) as avg_combo,
-                    SUM(CASE WHEN s.rank IN ('S','SS','X','XH') THEN 1 ELSE 0 END) as s_ranks,
-                    COUNT(CASE WHEN s.count_miss = 0 AND s.is_pass THEN 1 END) as fc_count
+            return await conn.fetch("""
+                SELECT
+                    pl.score, pl.accuracy, pl.mods, pl.rank, pl.count_miss, pl.updated_at,
+                    p.osu_username, p.discord_id
+                FROM pool_leaderboard pl
+                JOIN players p ON p.discord_id = pl.discord_id
+                WHERE pl.pool_id=$1 AND pl.beatmap_id=$2
+                ORDER BY pl.score DESC
+            """, pool_id, beatmap_id)
+
+    async def get_global_leaderboard(self, guild_id):
+        """Einde-LAN ranking: totaal score over alle pool_leaderboard entries per speler."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    p.osu_username, p.discord_id,
+                    COUNT(DISTINCT pl.beatmap_id)         AS maps_completed,
+                    SUM(pl.score)                          AS total_score,
+                    AVG(pl.accuracy)                       AS avg_accuracy,
+                    SUM(CASE WHEN pl.count_miss = 0 THEN 1 ELSE 0 END) AS fc_count
                 FROM players p
-                LEFT JOIN scores s ON s.discord_id = p.discord_id
-                WHERE p.discord_id IN (
-                    SELECT discord_id FROM players WHERE discord_id IN (
-                        SELECT discord_id FROM scores WHERE discord_id IS NOT NULL
-                    )
-                )
+                LEFT JOIN pool_leaderboard pl ON pl.discord_id = p.discord_id
+                JOIN pools po ON po.id = pl.pool_id AND po.guild_id = $1
                 GROUP BY p.osu_username, p.discord_id
                 ORDER BY total_score DESC NULLS LAST
-            """
-            return await conn.fetch(query)
+            """, guild_id)
 
-    # --- Guild settings ---
+    async def get_player_pool_scores(self, discord_id, pool_id):
+        """Alle pool scores van 1 speler in 1 pool."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    pl.score, pl.accuracy, pl.mods, pl.rank, pl.count_miss, pl.updated_at,
+                    pm.title, pm.artist, pm.version, pm.slot, pm.mod_category
+                FROM pool_leaderboard pl
+                JOIN pool_maps pm ON pm.pool_id = pl.pool_id AND pm.beatmap_id = pl.beatmap_id
+                WHERE pl.discord_id=$1 AND pl.pool_id=$2
+                ORDER BY pm.mod_category, pm.slot
+            """, discord_id, pool_id)
+
+    async def get_player_all_scores(self, discord_id, limit=50, client_type=None):
+        """Alle scores van een speler, optioneel gefilterd op client type."""
+        async with self.pool.acquire() as conn:
+            if client_type:
+                return await conn.fetch("""
+                    SELECT * FROM scores
+                    WHERE discord_id=$1 AND client_type=$2
+                    ORDER BY submitted_at DESC LIMIT $3
+                """, discord_id, client_type, limit)
+            return await conn.fetch("""
+                SELECT * FROM scores
+                WHERE discord_id=$1
+                ORDER BY submitted_at DESC LIMIT $2
+            """, discord_id, limit)
+
+    async def get_player_stats_summary(self, discord_id):
+        """Samenvatting stats voor /profile."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("""
+                SELECT
+                    COUNT(*)                                        AS total_scores,
+                    COUNT(*) FILTER (WHERE client_type='lazer')     AS lazer_scores,
+                    COUNT(*) FILTER (WHERE client_type='stable')    AS stable_scores,
+                    COUNT(*) FILTER (WHERE is_pool_score=TRUE)      AS pool_scores,
+                    AVG(accuracy) FILTER (WHERE is_pass=TRUE)       AS avg_accuracy,
+                    MAX(score)                                       AS top_score,
+                    SUM(CASE WHEN count_miss=0 AND is_pass=TRUE THEN 1 ELSE 0 END) AS fc_count,
+                    COUNT(*) FILTER (WHERE is_pass=TRUE)            AS pass_count
+                FROM scores WHERE discord_id=$1
+            """, discord_id)
+
+    async def get_player_pool_summary(self, discord_id, guild_id):
+        """Hoeveel pool maps gespeeld per pool."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    po.name AS pool_name, po.id AS pool_id,
+                    COUNT(pl.beatmap_id) AS maps_done,
+                    (SELECT COUNT(*) FROM pool_maps WHERE pool_id=po.id) AS maps_total,
+                    SUM(pl.score) AS total_score,
+                    AVG(pl.accuracy) AS avg_accuracy
+                FROM pools po
+                LEFT JOIN pool_leaderboard pl ON pl.pool_id=po.id AND pl.discord_id=$1
+                WHERE po.guild_id=$2
+                GROUP BY po.id, po.name
+                ORDER BY po.created_at
+            """, discord_id, guild_id)
+
+    async def get_recent_scores(self, discord_id, limit=5):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT s.*, pm.title, pm.slot, pm.mod_category
+                FROM scores s
+                LEFT JOIN pool_maps pm ON pm.beatmap_id = s.beatmap_id
+                WHERE s.discord_id=$1
+                ORDER BY s.submitted_at DESC
+                LIMIT $2
+            """, discord_id, limit)
+
+    async def compare_players(self, discord_id_a, discord_id_b, guild_id):
+        """Vergelijk twee spelers op pool scores."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    pm.slot, pm.mod_category, pm.title,
+                    pla.score AS score_a, pla.accuracy AS acc_a,
+                    plb.score AS score_b, plb.accuracy AS acc_b
+                FROM pool_maps pm
+                JOIN pools po ON po.id = pm.pool_id AND po.guild_id=$3
+                LEFT JOIN pool_leaderboard pla ON pla.pool_id=pm.pool_id AND pla.beatmap_id=pm.beatmap_id AND pla.discord_id=$1
+                LEFT JOIN pool_leaderboard plb ON plb.pool_id=pm.pool_id AND plb.beatmap_id=pm.beatmap_id AND plb.discord_id=$2
+                ORDER BY pm.mod_category, pm.slot
+            """, discord_id_a, discord_id_b, guild_id)
+
+    # ── Guild settings ───────────────────────────────────────────────────────
+
     async def get_guild_settings(self, guild_id):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM guild_settings WHERE guild_id=$1", guild_id)
             if not row:
-                await conn.execute("INSERT INTO guild_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING", guild_id)
+                await conn.execute(
+                    "INSERT INTO guild_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING", guild_id
+                )
                 row = await conn.fetchrow("SELECT * FROM guild_settings WHERE guild_id=$1", guild_id)
             return row
 
@@ -252,38 +452,23 @@ class Database:
                 guild_id, *vals
             )
 
-    # --- Tracking sessions ---
-    async def create_tracking_session(self, guild_id, started_by, interval, is_test=False):
+    # ── Tracking sessions ────────────────────────────────────────────────────
+
+    async def create_tracking_session(self, guild_id, started_by, interval):
         async with self.pool.acquire() as conn:
             return await conn.fetchrow("""
-                INSERT INTO tracking_sessions (guild_id, started_by, start_time, interval_seconds, is_test, active)
-                VALUES ($1, $2, NOW(), $3, $4, TRUE)
+                INSERT INTO tracking_sessions (guild_id, started_by, start_time, interval_seconds, active)
+                VALUES ($1, $2, NOW(), $3, TRUE)
                 RETURNING *
-            """, guild_id, started_by, interval, is_test)
-
-    async def delete_pool(self, pool_id: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM pools WHERE id=$1", pool_id)
-
-    async def get_all_scores_raw(self, limit=200):
-        """Voor debug: haal recente ruwe scores op."""
-        async with self.pool.acquire() as conn:
-            return await conn.fetch("""
-                SELECT s.*, p.osu_username FROM scores s
-                LEFT JOIN players p ON p.discord_id = s.discord_id
-                ORDER BY s.tracked_at DESC LIMIT $1
-            """, limit)
+            """, guild_id, started_by, interval)
 
     async def end_tracking_session(self, session_id):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                UPDATE tracking_sessions SET active=FALSE, end_time=NOW()
-                WHERE id=$1
+                UPDATE tracking_sessions SET active=FALSE, end_time=NOW() WHERE id=$1
             """, session_id)
 
-    async def delete_pool(self, pool_id: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute("DELETE FROM pools WHERE id=$1", pool_id)
+    # ── Debug ────────────────────────────────────────────────────────────────
 
     async def get_all_scores_raw(self, limit=50):
         async with self.pool.acquire() as conn:
@@ -292,7 +477,3 @@ class Database:
                 LEFT JOIN players p ON p.discord_id = s.discord_id
                 ORDER BY s.tracked_at DESC LIMIT $1
             """, limit)
-
-    async def get_score_by_osu_id(self, osu_score_id: int):
-        async with self.pool.acquire() as conn:
-            return await conn.fetchrow("SELECT * FROM scores WHERE osu_score_id=$1", osu_score_id)
