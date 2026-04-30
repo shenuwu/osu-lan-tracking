@@ -49,7 +49,7 @@ class PlayerCog(commands.Cog):
     @app_commands.command(name="link_osu", description="Koppel een osu! account aan de bot voor score tracking (admin)")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def link_osu(self, interaction: discord.Interaction):
-        client_id    = os.getenv("OSU_CLIENT_ID")
+        client_id    = os.getenv("OSU_OAUTH_CLIENT_ID") or os.getenv("OSU_CLIENT_ID")
         redirect_uri = os.getenv("OSU_REDIRECT_URI")
 
         if not redirect_uri:
@@ -92,6 +92,9 @@ class PlayerCog(commands.Cog):
             color=0xFF66AA
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="unregister", description="Verwijder jezelf uit de LAN tracker")
+    async def unregister(self, interaction: discord.Interaction):
         result = await self.bot.db.remove_player(interaction.user.id)
         msg = "✅ Verwijderd." if result != "DELETE 0" else "❌ Je staat niet in de tracker."
         await interaction.response.send_message(msg, ephemeral=True)

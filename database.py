@@ -172,6 +172,7 @@ class Database:
 
     async def remove_player(self, discord_id):
         async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE scores SET discord_id=NULL WHERE discord_id=$1", discord_id)
             return await conn.execute("DELETE FROM players WHERE discord_id=$1", discord_id)
 
     async def get_player(self, discord_id):
