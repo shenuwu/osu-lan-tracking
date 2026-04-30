@@ -239,6 +239,7 @@ class Database:
             return row is not None
 
     async def save_score(self, data: dict):
+        """Insert score. Returnt (score_id, is_new). score_id is altijd gevuld als de score bestaat."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO scores (
@@ -268,7 +269,13 @@ class Database:
                 data.get("is_valid", True), data.get("invalid_reason"),
                 _utc(data["submitted_at"])
             )
-            return row
+            if row:
+                return row["id"], True
+            # Score bestond al — haal id op voor leaderboard update
+            existing = await conn.fetchrow(
+                "SELECT id FROM scores WHERE osu_score_id=$1", data["osu_score_id"]
+            )
+            return (existing["id"] if existing else None), False
 
     async def update_pool_leaderboard(self, pool_id, beatmap_id, discord_id, score_row_id, score, accuracy, mods, rank, count_miss):
         """Vervang leaderboard entry als de nieuwe score hoger is."""
