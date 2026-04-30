@@ -290,6 +290,11 @@ class Database:
             )
             return (existing["id"] if existing else None), False
 
+    async def update_score_value(self, score_id: int, score: int):
+        """Update de score waarde van een bestaande score (voor lazer scores die als 0 waren opgeslagen)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE scores SET score=$2 WHERE id=$1", score_id, score)
+
     async def update_pool_leaderboard(self, pool_id, beatmap_id, discord_id, score_row_id, score, accuracy, mods, rank, count_miss):
         """Vervang leaderboard entry als de nieuwe score hoger is."""
         async with self.pool.acquire() as conn:

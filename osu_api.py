@@ -122,8 +122,12 @@ class OsuAPI:
         return await self.request(f"/users/{osu_id}/scores/recent", params={
             "limit": limit,
             "include_fails": 1,
-            "legacy_only": 1,   # score veld is altijd gevuld; type veld onderscheidt lazer/stable
+            "legacy_only": 1,
         })
+
+    async def get_score(self, score_id: int):
+        """Haal een individuele score op — geeft total_score terug voor lazer scores."""
+        return await self.request(f"/scores/osu/{score_id}")
 
     async def get_beatmap(self, beatmap_id: int):
         return await self.request(f"/beatmaps/{beatmap_id}")
@@ -179,18 +183,9 @@ class OsuAPI:
                 is_valid = False
                 invalid_reason = "Score niet gepasst"
 
-        # Score ophalen
-        # Lazer scores via recent endpoint geven score=0 terug — bereken ScoreV2 zelf
+        # Score ophalen — lazer recent endpoint geeft score=0, wordt apart opgehaald in tracking
         client_type = "lazer" if self.is_lazer_score(raw) else "stable"
-        raw_score = raw.get("score") or 0
-
-        if client_type == "lazer" and raw_score == 0:
-            beatmap_max_combo = (pool_map.get("max_combo") or 0) if pool_map else (beatmap.get("max_combo") or 0)
-            raw_score = self._calculate_scorev2(
-                accuracy=raw.get("accuracy") or 0,
-                max_combo=raw.get("max_combo") or 0,
-                beatmap_max_combo=beatmap_max_combo,
-            )
+        raw_score = raw.get("score") or raw.get("total_score") or 0
 
         return {
             "osu_score_id":   raw.get("id"),

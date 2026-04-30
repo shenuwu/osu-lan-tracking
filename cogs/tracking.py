@@ -198,10 +198,29 @@ class TrackingCog(commands.Cog):
                         discord_id=player["discord_id"], pool_map=pool_map
                     )
 
+                    # Lazer scores komen met score=0 via recent endpoint
+                    # Haal de echte score op via /scores/osu/{id}
+                    if parsed["client_type"] == "lazer" and parsed["score"] == 0 and score_id:
+                        try:
+                            score_detail = await self.bot.osu.get_score(score_id)
+                            if score_detail:
+                                real_score = score_detail.get("total_score") or score_detail.get("score") or 0
+                                # NF halveert de score in lazer — x2 voor de echte waarde (max 1M)
+                                if parsed["has_nf"] and real_score > 0:
+                                    real_score = real_score * 2
+                                parsed["score"] = real_score
+                                logger.info(f"Score opgehaald via API: {player['osu_username']} score={real_score}")
+                        except Exception as e:
+                            logger.error(f"get_score gefaald voor {score_id}: {e}")
+
                     score_db_id, is_new = await self.bot.db.save_score(parsed)
                     if not score_db_id:
                         logger.warning(f"save_score gaf geen id terug voor score {score_id}")
                         continue
+
+                    # Update score in DB als het als 0 was opgeslagen maar nu correct is
+                    if parsed["score"] > 0:
+                        await self.bot.db.update_score_value(score_db_id, parsed["score"])
 
                     if is_new:
                         total_new += 1
@@ -213,11 +232,8 @@ class TrackingCog(commands.Cog):
                             and parsed["client_type"] == "lazer"):
                         logger.info(
                             f"Pool score: {player['osu_username']} op {parsed['pool_slot']} "
-                            f"score={parsed['score']} acc={parsed['accuracy']} mods={parsed['mods']} "
-                            f"client={parsed['client_type']} has_nf={parsed['has_nf']}"
+                            f"score={parsed['score']} acc={parsed['accuracy']} mods={parsed['mods']}"
                         )
-                        logger.info(f"RAW ALL KEYS: {list(raw.keys())}")
-                        logger.info(f"RAW SCORE FIELDS: { {k:v for k,v in raw.items() if 'score' in k.lower() or k in ['total_score','score','accuracy','passed','mods','statistics']} }")
                         try:
                             improved = await self.bot.db.update_pool_leaderboard(
                                 pool_id=parsed["pool_id"],
