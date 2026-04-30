@@ -126,8 +126,14 @@ class OsuAPI:
         })
 
     async def get_score(self, score_id: int):
-        """Haal een individuele score op — geeft total_score terug voor lazer scores."""
-        return await self.request(f"/scores/osu/{score_id}")
+        """Haal een individuele score op via meerdere endpoints."""
+        # Probeer eerst de nieuwe endpoint
+        result = await self.request(f"/scores/{score_id}")
+        if result and (result.get("total_score") or result.get("score")):
+            return result
+        # Fallback: oude endpoint
+        result = await self.request(f"/scores/osu/{score_id}")
+        return result
 
     async def get_beatmap(self, beatmap_id: int):
         return await self.request(f"/beatmaps/{beatmap_id}")
