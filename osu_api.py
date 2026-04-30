@@ -158,8 +158,6 @@ class OsuAPI:
         mod_str = "".join(mods_list) if mods_list else "NM"
         has_nf = "NF" in mods_list
 
-        client_type = "lazer" if self.is_lazer_score(raw) else "stable"
-
         submitted_str = raw.get("ended_at") or raw.get("created_at", "")
         try:
             submitted_at = datetime.fromisoformat(submitted_str.replace("Z", "+00:00"))
@@ -188,11 +186,14 @@ class OsuAPI:
                 invalid_reason = "Score niet gepasst"
 
         # Score: lazer gebruikt total_score, stable gebruikt score
-        # Neem het grootste van de twee om edge cases op te vangen
-        raw_score = max(
-            raw.get("total_score") or 0,
-            raw.get("score") or 0,
-        )
+        # Als total_score 0 of None is, val terug op score veld
+        raw_score = raw.get("total_score") or raw.get("score") or 0
+
+        # NF halveert de score op lazer — vermenigvuldig met 2 om de echte score te krijgen
+        # Alleen doen als het een lazer score is (total_score veld bestaat) en NF aan staat
+        client_type = "lazer" if self.is_lazer_score(raw) else "stable"
+        if has_nf and client_type == "lazer" and raw_score > 0:
+            raw_score = raw_score * 2
 
         return {
             "osu_score_id":   raw.get("id"),

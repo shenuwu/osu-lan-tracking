@@ -210,6 +210,11 @@ class TrackingCog(commands.Cog):
                             and parsed["is_valid"]
                             and parsed["is_pass"]
                             and parsed["client_type"] == "lazer"):
+                        logger.info(
+                            f"Pool score: {player['osu_username']} op {parsed['pool_slot']} "
+                            f"score={parsed['score']} acc={parsed['accuracy']} mods={parsed['mods']} "
+                            f"client={parsed['client_type']} has_nf={parsed['has_nf']}"
+                        )
                         try:
                             improved = await self.bot.db.update_pool_leaderboard(
                                 pool_id=parsed["pool_id"],
