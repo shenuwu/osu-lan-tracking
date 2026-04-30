@@ -25,14 +25,19 @@ async def handle_callback(request: web.Request) -> web.Response:
     client_secret = os.getenv("OSU_OAUTH_CLIENT_SECRET") or os.getenv("OSU_CLIENT_SECRET")
     redirect_uri  = os.getenv("OSU_REDIRECT_URI")
 
+    logger.info(f"Token exchange: client_id={client_id} redirect_uri={redirect_uri} code={code[:10]}...")
+
+    payload = {
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "code":          code,
+        "grant_type":    "authorization_code",
+        "redirect_uri":  redirect_uri,
+    }
+    logger.info(f"Payload (zonder secret): { {k:v for k,v in payload.items() if k != 'client_secret'} }")
+
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(OSU_TOKEN_URL, json={
-            "client_id":     client_id,
-            "client_secret": client_secret,
-            "code":          code,
-            "grant_type":    "authorization_code",
-            "redirect_uri":  redirect_uri,
-        })
+        resp = await session.post(OSU_TOKEN_URL, json=payload)
         if resp.status != 200:
             text = await resp.text()
             logger.error(f"Token exchange gefaald: {resp.status} {text}")
