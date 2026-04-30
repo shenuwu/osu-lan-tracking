@@ -118,11 +118,11 @@ class OsuAPI:
         return await self.request(f"/users/{osu_id}/osu")
 
     async def get_recent_scores(self, osu_id: int, limit=50):
-        """Haalt recente scores op — bevat zowel stable als lazer scores."""
+        """Haalt recente scores op. legacy_only=1 zorgt dat score veld altijd gevuld is."""
         return await self.request(f"/users/{osu_id}/scores/recent", params={
             "limit": limit,
             "include_fails": 1,
-            "legacy_only": 0,   # 0 = ook lazer scores
+            "legacy_only": 1,   # score veld is altijd gevuld; type veld onderscheidt lazer/stable
         })
 
     async def get_beatmap(self, beatmap_id: int):
@@ -130,19 +130,13 @@ class OsuAPI:
 
     def is_lazer_score(self, raw: dict) -> bool:
         """
-        Lazer scores hebben build_id of classic_total_hit_count of
-        de mods als lijst van dicts met settings.
+        Met legacy_only=1 geeft de API het 'type' veld terug:
+        'solo_score' = lazer, 'score' of ontbrekend = stable.
         """
-        # Duidelijkste indicator: build_id aanwezig in score data
-        if raw.get("build_id"):
+        score_type = raw.get("type", "")
+        if score_type == "solo_score":
             return True
-        # Of: mods is een lijst van dicts met een 'settings' key
-        mods = raw.get("mods", [])
-        if isinstance(mods, list):
-            for m in mods:
-                if isinstance(m, dict) and "settings" in m:
-                    return True
-        # Fallback: legacy_score_id ontbreekt maar score_id bestaat (lazer patroon)
+        # Fallback: legacy_score_id is None voor lazer scores
         if raw.get("legacy_score_id") is None and raw.get("id"):
             return True
         return False
@@ -185,12 +179,10 @@ class OsuAPI:
                 is_valid = False
                 invalid_reason = "Score niet gepasst"
 
-        # Score: lazer gebruikt total_score, stable gebruikt score
-        # Als total_score 0 of None is, val terug op score veld
-        raw_score = raw.get("total_score") or raw.get("score") or 0
+        # Met legacy_only=1 is het score veld altijd gevuld met de legacy score waarde
+        raw_score = raw.get("score") or 0
 
-        # NF halveert de score op lazer — vermenigvuldig met 2 om de echte score te krijgen
-        # Alleen doen als het een lazer score is (total_score veld bestaat) en NF aan staat
+        # NF halveert de score — vermenigvuldig met 2 voor de echte waarde
         client_type = "lazer" if self.is_lazer_score(raw) else "stable"
         if has_nf and client_type == "lazer" and raw_score > 0:
             raw_score = raw_score * 2
