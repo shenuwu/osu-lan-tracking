@@ -140,9 +140,11 @@ class OsuAPI:
     async def refresh_user_token(self, refresh_token: str) -> dict | None:
         """Vernieuw een verlopen OAuth token."""
         await self.ensure_session()
+        client_id     = os.getenv("OSU_OAUTH_CLIENT_ID") or self.client_id
+        client_secret = os.getenv("OSU_OAUTH_CLIENT_SECRET") or self.client_secret
         resp = await self.session.post(self.TOKEN_URL, json={
-            "client_id":     self.client_id,
-            "client_secret": self.client_secret,
+            "client_id":     client_id,
+            "client_secret": client_secret,
             "grant_type":    "refresh_token",
             "refresh_token": refresh_token,
             "scope":         "public identify",

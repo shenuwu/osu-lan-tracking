@@ -21,8 +21,8 @@ async def handle_callback(request: web.Request) -> web.Response:
     if not code:
         return web.Response(text="Ongeldige callback — code ontbreekt.", status=400)
 
-    client_id     = os.getenv("OSU_CLIENT_ID")
-    client_secret = os.getenv("OSU_CLIENT_SECRET")
+    client_id     = os.getenv("OSU_OAUTH_CLIENT_ID") or os.getenv("OSU_CLIENT_ID")
+    client_secret = os.getenv("OSU_OAUTH_CLIENT_SECRET") or os.getenv("OSU_CLIENT_SECRET")
     redirect_uri  = os.getenv("OSU_REDIRECT_URI")
 
     async with aiohttp.ClientSession() as session:
