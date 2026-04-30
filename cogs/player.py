@@ -46,9 +46,9 @@ class PlayerCog(commands.Cog):
         embed.add_field(name="Rank", value=f"#{rank:,}" if rank else "Unranked")
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="bot_link", description="Koppel een osu! account aan de bot voor score tracking (admin)")
+    @app_commands.command(name="link_osu", description="Koppel een osu! account aan de bot voor score tracking (admin)")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def bot_link(self, interaction: discord.Interaction):
+    async def link_osu(self, interaction: discord.Interaction):
         client_id    = os.getenv("OSU_CLIENT_ID")
         redirect_uri = os.getenv("OSU_REDIRECT_URI")
 
