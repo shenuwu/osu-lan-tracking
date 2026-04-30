@@ -256,19 +256,6 @@ class AdminCog(commands.Cog):
         await self.bot.db.update_guild_settings(interaction.guild_id, score_channel_id=channel.id)
         await interaction.response.send_message(f"✅ Score notificaties → {channel.mention}.", ephemeral=True)
 
-    @app_commands.command(name="tracking_status", description="Huidige tracking status")
-    @admin_only()
-    async def tracking_status(self, interaction: discord.Interaction):
-        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
-        players = await self.bot.db.get_all_players()
-        status = "🟢 Actief" if settings["tracking_active"] else "🔴 Gestopt"
-        embed = discord.Embed(title="📡 Tracking Status", color=0x66FF99 if settings["tracking_active"] else 0xFF6666)
-        embed.add_field(name="Status", value=status)
-        embed.add_field(name="Spelers", value=str(len(players)))
-        if settings.get("score_channel_id"):
-            ch = interaction.guild.get_channel(settings["score_channel_id"])
-            embed.add_field(name="Score channel", value=ch.mention if ch else f"`{settings['score_channel_id']}`")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot):
