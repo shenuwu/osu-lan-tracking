@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+import os
 
 RANK_EMOJIS = {"XH": "🌟", "X": "⭐", "SH": "💿", "S": "💽", "A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "💀"}
 
@@ -45,8 +46,52 @@ class PlayerCog(commands.Cog):
         embed.add_field(name="Rank", value=f"#{rank:,}" if rank else "Unranked")
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="unregister", description="Verwijder jezelf uit de LAN tracker")
-    async def unregister(self, interaction: discord.Interaction):
+    @app_commands.command(name="bot_link", description="Koppel een osu! account aan de bot voor score tracking (admin)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def bot_link(self, interaction: discord.Interaction):
+        client_id    = os.getenv("OSU_CLIENT_ID")
+        redirect_uri = os.getenv("OSU_REDIRECT_URI")
+
+        if not redirect_uri:
+            return await interaction.response.send_message(
+                "❌ OSU_REDIRECT_URI is niet ingesteld in de environment variables.",
+                ephemeral=True
+            )
+
+        import urllib.parse
+        params = urllib.parse.urlencode({
+            "client_id":     client_id,
+            "redirect_uri":  redirect_uri,
+            "response_type": "code",
+            "scope":         "public identify",
+            "state":         "bot",
+        })
+        oauth_url = f"https://osu.ppy.sh/oauth/authorize?{params}"
+
+        # Check of er al een token is
+        existing = await self.bot.db.get_oauth_token(0)
+        status_str = ""
+        if existing:
+            from datetime import datetime, timezone
+            expires = existing["expires_at"]
+            if hasattr(expires, 'replace'):
+                expires = expires.replace(tzinfo=timezone.utc) if expires.tzinfo is None else expires
+            if expires > datetime.now(timezone.utc):
+                status_str = f"\n✅ Bot is al gekoppeld (token geldig tot {expires.strftime('%d-%m %H:%M')} UTC)"
+            else:
+                status_str = "\n⚠️ Bestaand token is verlopen — herlink om te vernieuwen."
+
+        embed = discord.Embed(
+            title="🔗 Bot OAuth koppelen",
+            description=(
+                f"Klik op de link en log in met **jouw** osu! account.\n"
+                f"De bot gebruikt dit token voor alle score lookups.\n\n"
+                f"**[→ Koppel via osu! OAuth]({oauth_url})**"
+                f"{status_str}"
+            ),
+            color=0xFF66AA
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         result = await self.bot.db.remove_player(interaction.user.id)
         msg = "✅ Verwijderd." if result != "DELETE 0" else "❌ Je staat niet in de tracker."
         await interaction.response.send_message(msg, ephemeral=True)

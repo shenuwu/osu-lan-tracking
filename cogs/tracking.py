@@ -198,6 +198,34 @@ class TrackingCog(commands.Cog):
                         discord_id=player["discord_id"], pool_map=pool_map
                     )
 
+                    # Als score=0 (lazer): gebruik bot OAuth token voor echte score
+                    if parsed["client_type"] == "lazer" and parsed["score"] == 0:
+                        oauth = await self.bot.db.get_oauth_token(0)  # 0 = bot token
+                        if oauth:
+                            try:
+                                from datetime import datetime, timezone, timedelta
+                                expires = oauth["expires_at"]
+                                if hasattr(expires, 'replace'):
+                                    expires = expires.replace(tzinfo=timezone.utc) if expires.tzinfo is None else expires
+                                if expires < datetime.now(timezone.utc):
+                                    new_token = await self.bot.osu.refresh_user_token(oauth["refresh_token"])
+                                    if new_token:
+                                        new_expires = datetime.now(timezone.utc) + timedelta(seconds=new_token.get("expires_in", 86400))
+                                        await self.bot.db.save_oauth_token(
+                                            0, oauth["osu_id"],
+                                            new_token["access_token"], new_token["refresh_token"], new_expires
+                                        )
+                                        oauth = await self.bot.db.get_oauth_token(0)
+
+                                detail = await self.bot.osu.get_score_with_token(score_id, oauth["access_token"])
+                                if detail:
+                                    real = detail.get("total_score") or detail.get("score") or 0
+                                    if real > 0:
+                                        parsed["score"] = real
+                                        logger.info(f"OAuth score: {player['osu_username']} total_score={real}")
+                            except Exception as e:
+                                logger.error(f"OAuth score fetch gefaald: {e}")
+
                     score_db_id, is_new = await self.bot.db.save_score(parsed)
                     if not score_db_id:
                         logger.warning(f"save_score gaf geen id terug voor score {score_id}")

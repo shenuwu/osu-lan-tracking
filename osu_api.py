@@ -1,7 +1,10 @@
 import aiohttp
 import os
 import json
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger("osu_api")
 
 # Mod categorieën die per pool slot vereist zijn
 MOD_CATEGORY_MODS = {
@@ -125,24 +128,36 @@ class OsuAPI:
             "legacy_only": 1,
         })
 
-    async def get_score(self, score_id: int, best_id: int = None):
-        """Haal een individuele score op."""
+    async def get_score_with_token(self, score_id: int, access_token: str) -> dict | None:
+        """Haal score op met user OAuth token — geeft total_score terug."""
         await self.ensure_session()
-        if not self.token:
-            await self.get_token()
-        headers = {"Authorization": f"Bearer {self.token}"}
+        headers = {"Authorization": f"Bearer {access_token}"}
+        resp = await self.session.get(f"{self.BASE}/scores/{score_id}", headers=headers)
+        if resp.status == 200:
+            return await resp.json()
+        return None
 
-        for url in [
-            f"{self.BASE}/scores/{score_id}",
-            f"{self.BASE}/scores/osu/{score_id}",
-        ]:
-            resp = await self.session.get(url, headers=headers)
-            import logging
-            logging.getLogger("tracking").info(f"GET {url} -> {resp.status}")
-            if resp.status == 200:
-                data = await resp.json()
-                logging.getLogger("tracking").info(f"Response keys: {list(data.keys())} total_score={data.get('total_score')} score={data.get('score')}")
-                return data
+    async def refresh_user_token(self, refresh_token: str) -> dict | None:
+        """Vernieuw een verlopen OAuth token."""
+        await self.ensure_session()
+        resp = await self.session.post(self.TOKEN_URL, json={
+            "client_id":     self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type":    "refresh_token",
+            "refresh_token": refresh_token,
+            "scope":         "public identify",
+        })
+        if resp.status == 200:
+            return await resp.json()
+        return None
+
+    async def get_user_me(self, access_token: str) -> dict | None:
+        """Haal osu! user op via OAuth token."""
+        await self.ensure_session()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        resp = await self.session.get(f"{self.BASE}/me/osu", headers=headers)
+        if resp.status == 200:
+            return await resp.json()
         return None
 
     async def get_beatmap(self, beatmap_id: int):
@@ -204,12 +219,27 @@ class OsuAPI:
         raw_score = raw.get("score") or raw.get("total_score") or 0
 
         if client_type == "lazer" and raw_score == 0:
-            bm_max_combo = beatmap.get("max_combo") or 0
-            raw_score = self._calculate_scorev2(
-                accuracy=raw.get("accuracy") or 0,
-                max_combo=raw.get("max_combo") or 0,
-                beatmap_max_combo=bm_max_combo,
-            )
+            # Probeer max_combo te halen: eerst uit pool_map (opgeslagen bij add_map),
+            # dan uit de beatmap data in de raw response
+            bm_max_combo = 0
+            if pool_map and pool_map.get("max_combo"):
+                bm_max_combo = pool_map["max_combo"]
+            elif beatmap.get("max_combo"):
+                bm_max_combo = beatmap["max_combo"]
+
+            player_combo = raw.get("max_combo") or 0
+
+            if bm_max_combo > 0 and player_combo > 0:
+                raw_score = self._calculate_scorev2(
+                    accuracy=raw.get("accuracy") or 0,
+                    max_combo=player_combo,
+                    beatmap_max_combo=bm_max_combo,
+                )
+            else:
+                # Geen combo data — bereken alleen op basis van accuracy (combo portion = 0)
+                acc = raw.get("accuracy") or 0
+                raw_score = int(1_000_000 * acc * 0.3)
+                logger.warning(f"Geen beatmap max_combo beschikbaar voor beatmap {beatmap_id}, score berekend op accuracy only")
         # Geen NF x2 nodig — formule berekent al de score op 1M scale (zonder NF penalty)
 
         return {

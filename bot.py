@@ -5,6 +5,7 @@ import asyncio
 import logging
 from database import Database
 from osu_api import OsuAPI
+from oauth_server import start_oauth_server
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,6 +44,9 @@ async def main():
         bot.db = Database()
         await bot.db.init()
 
+        logger.info("OAuth server starten...")
+        oauth_runner = await start_oauth_server(bot.db)
+
         logger.info("osu! API initialiseren...")
         bot.osu = OsuAPI()
         await bot.osu.get_token()
@@ -53,7 +57,10 @@ async def main():
             logger.info(f"{cog} geladen")
 
         logger.info("Bot wordt gestart...")
-        await bot.start(os.getenv("DISCORD_TOKEN"))
+        try:
+            await bot.start(os.getenv("DISCORD_TOKEN"))
+        finally:
+            await oauth_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

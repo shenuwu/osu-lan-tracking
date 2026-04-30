@@ -118,6 +118,15 @@ class Database:
                     tracking_active     BOOLEAN DEFAULT FALSE,
                     tracking_session_id INT REFERENCES tracking_sessions(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS oauth_tokens (
+                    discord_id    BIGINT PRIMARY KEY,
+                    osu_id        BIGINT NOT NULL,
+                    access_token  TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    expires_at    TIMESTAMPTZ NOT NULL,
+                    updated_at    TIMESTAMPTZ DEFAULT NOW()
+                );
             """)
 
             # Migraties voor bestaande databases
@@ -581,3 +590,22 @@ class Database:
                 LEFT JOIN players p ON p.discord_id = s.discord_id
                 ORDER BY s.tracked_at DESC LIMIT $1
             """, limit)
+
+    # ── OAuth tokens ─────────────────────────────────────────────────────────
+
+    async def save_oauth_token(self, discord_id: int, osu_id: int, access_token: str, refresh_token: str, expires_at):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO oauth_tokens (discord_id, osu_id, access_token, refresh_token, expires_at)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (discord_id) DO UPDATE
+                SET osu_id=$2, access_token=$3, refresh_token=$4, expires_at=$5, updated_at=NOW()
+            """, discord_id, osu_id, access_token, refresh_token, expires_at)
+
+    async def get_oauth_token(self, discord_id: int):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("SELECT * FROM oauth_tokens WHERE discord_id=$1", discord_id)
+
+    async def delete_oauth_token(self, discord_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM oauth_tokens WHERE discord_id=$1", discord_id)
