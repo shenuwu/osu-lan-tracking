@@ -179,13 +179,18 @@ class OsuAPI:
                 is_valid = False
                 invalid_reason = "Score niet gepasst"
 
-        # Met legacy_only=1 is het score veld altijd gevuld met de legacy score waarde
+        # Score ophalen
+        # Lazer scores via recent endpoint geven score=0 terug — bereken ScoreV2 zelf
+        client_type = "lazer" if self.is_lazer_score(raw) else "stable"
         raw_score = raw.get("score") or 0
 
-        # NF halveert de score — vermenigvuldig met 2 voor de echte waarde
-        client_type = "lazer" if self.is_lazer_score(raw) else "stable"
-        if has_nf and client_type == "lazer" and raw_score > 0:
-            raw_score = raw_score * 2
+        if client_type == "lazer" and raw_score == 0:
+            beatmap_max_combo = (pool_map.get("max_combo") or 0) if pool_map else (beatmap.get("max_combo") or 0)
+            raw_score = self._calculate_scorev2(
+                accuracy=raw.get("accuracy") or 0,
+                max_combo=raw.get("max_combo") or 0,
+                beatmap_max_combo=beatmap_max_combo,
+            )
 
         return {
             "osu_score_id":   raw.get("id"),
@@ -213,6 +218,22 @@ class OsuAPI:
             "invalid_reason": invalid_reason,
             "submitted_at":   submitted_at,
         }
+
+    def _calculate_scorev2(self, accuracy: float, max_combo: int, beatmap_max_combo: int) -> int:
+        """
+        Bereken osu! ScoreV2 score (max 1.000.000 bij SS FC).
+        combo_portion  = (combo / max_combo)^0.5 * 700_000
+        accuracy_portion = accuracy^10 * 300_000
+        NF halveert de ingame score maar wij berekenen de echte waarde direct.
+        """
+        if beatmap_max_combo > 0:
+            combo_ratio = min(max_combo / beatmap_max_combo, 1.0)
+        else:
+            combo_ratio = 1.0  # onbekend, neem FC aan
+
+        combo_portion    = (combo_ratio ** 0.5) * 700_000
+        accuracy_portion = (accuracy ** 10)     * 300_000
+        return int(combo_portion + accuracy_portion)
 
     async def close(self):
         if self.session and not self.session.closed:

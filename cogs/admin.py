@@ -224,7 +224,8 @@ class AdminCog(commands.Cog):
         await self.bot.db.add_map_to_pool(
             pool_id=pool_row["id"], beatmap_id=bm["id"], beatmapset_id=bms.get("id"),
             title=bms.get("title", "?"), artist=bms.get("artist", "?"),
-            version=bm.get("version", "?"), slot=slot_clean, mod_category=mod_category
+            version=bm.get("version", "?"), slot=slot_clean, mod_category=mod_category,
+            max_combo=bm.get("max_combo") or 0
         )
 
         embed = discord.Embed(

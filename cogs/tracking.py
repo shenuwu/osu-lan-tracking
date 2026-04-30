@@ -190,6 +190,7 @@ class TrackingCog(commands.Cog):
                             "pool_id":      pool_info["pool_id"],
                             "pool_slot":    pool_info["slot"],
                             "mod_category": pool_info["mod_category"] or "NM",
+                            "max_combo":    pool_info["max_combo"] or 0,
                         }
 
                     parsed = self.bot.osu.parse_score(

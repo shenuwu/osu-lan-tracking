@@ -138,6 +138,9 @@ class Database:
                 "ALTER TABLE pool_maps ADD COLUMN IF NOT EXISTS mod_category TEXT"
             )
             await conn.execute(
+                "ALTER TABLE pool_maps ADD COLUMN IF NOT EXISTS max_combo INT DEFAULT 0"
+            )
+            await conn.execute(
                 "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT"
             )
             await conn.execute(
@@ -208,14 +211,14 @@ class Database:
 
     # ── Pool maps ────────────────────────────────────────────────────────────
 
-    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category):
+    async def add_map_to_pool(self, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo=0):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO pool_maps (pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (pool_id, beatmap_id) DO UPDATE
-                SET slot=$7, mod_category=$8
-            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category)
+                SET slot=$7, mod_category=$8, max_combo=$9
+            """, pool_id, beatmap_id, beatmapset_id, title, artist, version, slot, mod_category, max_combo)
 
     async def remove_map_from_pool(self, pool_id, beatmap_id):
         async with self.pool.acquire() as conn:
@@ -238,7 +241,7 @@ class Database:
     async def get_all_pool_map_ids(self):
         """Alle beatmap IDs in alle pools, voor tracking filter."""
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT DISTINCT beatmap_id, pool_id, slot, mod_category FROM pool_maps")
+            rows = await conn.fetch("SELECT DISTINCT beatmap_id, pool_id, slot, mod_category, max_combo FROM pool_maps")
             return {r["beatmap_id"]: r for r in rows}
 
     # ── Scores ───────────────────────────────────────────────────────────────
