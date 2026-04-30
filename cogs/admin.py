@@ -31,6 +31,53 @@ async def pool_autocomplete(interaction: discord.Interaction, current: str):
     ][:25]
 
 
+MOD_CAT_EMOJI = {"NM": "🔵", "HD": "🟡", "HR": "🔴", "DT": "🟣", "FL": "⚫", "EZ": "🟢", "TB": "🏆"}
+
+
+async def post_pool_overview(bot, guild: discord.Guild, pool_row):
+    """Post een overzicht van alle maps in de pool thread, inclusief leaderboard scores."""
+    thread = guild.get_thread(pool_row["channel_id"])
+    if not thread:
+        return
+
+    maps = await bot.db.get_pool_maps(pool_row["id"])
+    lb_rows = await bot.db.get_pool_leaderboard(pool_row["id"])
+
+    # Bouw leaderboard index: beatmap_id -> lijst van entries
+    lb_by_map = {}
+    for r in lb_rows:
+        lb_by_map.setdefault(r["beatmap_id"], []).append(r)
+
+    categories = {}
+    for m in maps:
+        categories.setdefault(m["mod_category"] or "?", []).append(m)
+
+    embed = discord.Embed(title=f"🎵 {pool_row['name']}", color=0xFF66AA)
+    embed.set_footer(text=f"{len(maps)} maps • NF verplicht op alle slots")
+
+    for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
+        if cat not in categories:
+            continue
+        lines = []
+        for m in sorted(categories[cat], key=lambda x: x["slot"]):
+            map_line = f"`{m['slot']}` **[{m['artist']} - {m['title']} [{m['version']}]](https://osu.ppy.sh/beatmaps/{m['beatmap_id']})**"
+            entries = lb_by_map.get(m["beatmap_id"], [])
+            if entries:
+                top = entries[0]
+                miss_str = "FC ✨" if not top["count_miss"] else f"{top['count_miss']}x miss"
+                map_line += f"\n  🥇 **{top['osu_username']}** — `{top['score']:,}` • {top['accuracy']:.2f}% • {miss_str}"
+            else:
+                map_line += "\n  _(nog geen scores)_"
+            lines.append(map_line)
+        embed.add_field(
+            name=f"{MOD_CAT_EMOJI.get(cat, '⚪')} {cat}",
+            value="\n".join(lines),
+            inline=False
+        )
+
+    await thread.send(embed=embed)
+
+
 async def get_pool_by_autocomplete(bot, interaction, pool_id_str: str):
     """Haal pool op via autocomplete value (pool ID string)."""
     try:
@@ -181,6 +228,9 @@ class AdminCog(commands.Cog):
         embed.set_thumbnail(url=bms.get("covers", {}).get("list", ""))
         await interaction.followup.send(embed=embed)
 
+        # Post bijgewerkt pool overzicht in thread
+        await post_pool_overview(self.bot, interaction.guild, pool_row)
+
     @app_commands.command(name="remove_map", description="Verwijder een map uit een pool")
     @app_commands.describe(pool="De pool", beatmap_id="osu! beatmap ID")
     @app_commands.autocomplete(pool=pool_autocomplete)
@@ -195,6 +245,7 @@ class AdminCog(commands.Cog):
             return await interaction.followup.send("❌ Map staat niet in deze pool.")
         await self.bot.db.remove_map_from_pool(pool_row["id"], beatmap_id)
         await interaction.followup.send(f"✅ **{pm['title']}** ({pm['slot']}) verwijderd uit **{pool_row['name']}**.")
+        await post_pool_overview(self.bot, interaction.guild, pool_row)
 
     @app_commands.command(name="pool_info", description="Bekijk alle maps in een pool")
     @app_commands.describe(pool="De pool")
