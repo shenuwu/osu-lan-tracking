@@ -3,10 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 from collections import defaultdict
 
-RANK_EMOJIS = {
-    "XH": "🌟", "X": "⭐", "SH": "💿", "S": "💽",
-    "A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "💀"
-}
+RANK_EMOJIS = {"XH": "🌟", "X": "⭐", "SH": "💿", "S": "💽", "A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴", "F": "💀"}
 MEDALS = ["🥇", "🥈", "🥉"]
 MOD_CAT_EMOJI = {"NM": "🔵", "HD": "🟡", "HR": "🔴", "DT": "🟣", "FL": "⚫", "EZ": "🟢", "TB": "🏆"}
 
@@ -19,10 +16,20 @@ def fmt_acc(acc) -> str:
 def medal(i: int) -> str:
     return MEDALS[i] if i < len(MEDALS) else f"`#{i+1}`"
 
-async def get_pool(bot, interaction, pool_thread: discord.Thread):
-    pool = await bot.db.get_pool_by_channel(pool_thread.id)
+async def pool_autocomplete(interaction: discord.Interaction, current: str):
+    pools = await interaction.client.db.get_all_pools(interaction.guild_id)
+    return [
+        app_commands.Choice(name=p["name"], value=str(p["id"]))
+        for p in pools if current.lower() in p["name"].lower()
+    ][:25]
+
+async def get_pool(bot, interaction, pool_id_str: str):
+    try:
+        pool = await bot.db.get_pool_by_id(int(pool_id_str))
+    except Exception:
+        pool = None
     if not pool:
-        await interaction.followup.send("❌ Deze thread is geen geregistreerde pool.")
+        await interaction.followup.send("❌ Pool niet gevonden.")
     return pool
 
 
@@ -31,18 +38,17 @@ class StatsCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="leaderboard", description="Pool leaderboard — beste scores per map")
-    @app_commands.describe(pool_thread="De pool thread", category="Filter: NM, HD, HR of DT")
-    async def leaderboard(self, interaction: discord.Interaction,
-                          pool_thread: discord.Thread,
-                          category: str = None):
+    @app_commands.describe(pool="De pool", category="Filter: NM, HD, HR of DT")
+    @app_commands.autocomplete(pool=pool_autocomplete)
+    async def leaderboard(self, interaction: discord.Interaction, pool: str, category: str = None):
         await interaction.response.defer()
-        pool = await get_pool(self.bot, interaction, pool_thread)
-        if not pool:
+        pool_row = await get_pool(self.bot, interaction, pool)
+        if not pool_row:
             return
 
-        rows = await self.bot.db.get_pool_leaderboard(pool["id"])
+        rows = await self.bot.db.get_pool_leaderboard(pool_row["id"])
         if not rows:
-            return await interaction.followup.send(f"Nog geen scores in **{pool['name']}**.")
+            return await interaction.followup.send(f"Nog geen scores in **{pool_row['name']}**.")
 
         maps: dict = defaultdict(list)
         map_meta: dict = {}
@@ -52,27 +58,26 @@ class StatsCog(commands.Cog):
             maps[r["beatmap_id"]].append(r)
             if r["beatmap_id"] not in map_meta:
                 map_meta[r["beatmap_id"]] = {
-                    "title": r["title"], "artist": r["artist"], "version": r["version"],
+                    "title": r["title"], "version": r["version"],
                     "slot": r["slot"], "mod_category": r["mod_category"],
                 }
 
         if not maps:
-            return await interaction.followup.send("Geen scores gevonden voor dit filter.")
+            return await interaction.followup.send("Geen scores voor dit filter.")
 
         embed = discord.Embed(
-            title=f"🏆 {pool['name']}{'  —  ' + category.upper() if category else ''}",
+            title=f"🏆 {pool_row['name']}{'  —  ' + category.upper() if category else ''}",
             color=0xFF66AA
         )
-        embed.set_footer(text="Lazer NF scores • beste score per speler per map")
+        embed.set_footer(text="NF scores • beste score per speler per map")
 
         for beatmap_id, meta in sorted(map_meta.items(), key=lambda x: (x[1]["mod_category"], x[1]["slot"])):
             entries = maps[beatmap_id]
             cat_emoji = MOD_CAT_EMOJI.get(meta["mod_category"], "⚪")
-            title_s = meta["title"][:30] + "…" if len(meta["title"]) > 30 else meta["title"]
+            title_s = meta["title"][:28] + "…" if len(meta["title"]) > 28 else meta["title"]
             lines = [
-                f"{medal(i)} **{e['osu_username']}** — "
-                f"`{fmt_score(e['score'])}` • {fmt_acc(e['accuracy'])} • "
-                f"{'FC ✨' if not e['count_miss'] else str(e['count_miss'])+'x miss'} • `{e['mods']}`"
+                f"{medal(i)} **{e['osu_username']}** — `{fmt_score(e['score'])}` • "
+                f"{fmt_acc(e['accuracy'])} • {'FC ✨' if not e['count_miss'] else str(e['count_miss'])+'x miss'} • `{e['mods']}`"
                 for i, e in enumerate(entries)
             ]
             embed.add_field(
@@ -86,21 +91,20 @@ class StatsCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="map_leaderboard", description="Leaderboard van 1 specifieke map")
-    @app_commands.describe(pool_thread="De pool thread", slot="Slot bijv. NM1, HD2")
-    async def map_leaderboard(self, interaction: discord.Interaction,
-                               pool_thread: discord.Thread,
-                               slot: str):
+    @app_commands.describe(pool="De pool", slot="Slot bijv. NM1, HD2")
+    @app_commands.autocomplete(pool=pool_autocomplete)
+    async def map_leaderboard(self, interaction: discord.Interaction, pool: str, slot: str):
         await interaction.response.defer()
-        pool = await get_pool(self.bot, interaction, pool_thread)
-        if not pool:
+        pool_row = await get_pool(self.bot, interaction, pool)
+        if not pool_row:
             return
 
-        maps = await self.bot.db.get_pool_maps(pool["id"])
+        maps = await self.bot.db.get_pool_maps(pool_row["id"])
         target = next((m for m in maps if m["slot"].upper() == slot.upper()), None)
         if not target:
             return await interaction.followup.send(f"❌ Slot `{slot}` niet gevonden.")
 
-        entries = await self.bot.db.get_map_leaderboard(pool["id"], target["beatmap_id"])
+        entries = await self.bot.db.get_map_leaderboard(pool_row["id"], target["beatmap_id"])
         cat_emoji = MOD_CAT_EMOJI.get(target["mod_category"], "⚪")
         embed = discord.Embed(
             title=f"{cat_emoji} `{slot}` — {target['artist']} - {target['title']} [{target['version']}]",
@@ -186,23 +190,23 @@ class StatsCog(commands.Cog):
                 inline=False
             )
 
-        no_scores = [p["osu_username"] for p in players
-                     if not player_data.get(p["discord_id"], {}).get("total_score")]
+        no_scores = [p["osu_username"] for p in players if not player_data.get(p["discord_id"], {}).get("total_score")]
         if no_scores:
             embed.add_field(name="😴 Geen pool scores", value=", ".join(no_scores), inline=False)
 
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="pool_recap", description="Winnaar per map in een pool")
-    @app_commands.describe(pool_thread="De pool thread")
-    async def pool_recap(self, interaction: discord.Interaction, pool_thread: discord.Thread):
+    @app_commands.describe(pool="De pool")
+    @app_commands.autocomplete(pool=pool_autocomplete)
+    async def pool_recap(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer()
-        pool = await get_pool(self.bot, interaction, pool_thread)
-        if not pool:
+        pool_row = await get_pool(self.bot, interaction, pool)
+        if not pool_row:
             return
 
-        rows = await self.bot.db.get_pool_leaderboard(pool["id"])
-        maps_all = await self.bot.db.get_pool_maps(pool["id"])
+        rows = await self.bot.db.get_pool_leaderboard(pool_row["id"])
+        maps_all = await self.bot.db.get_pool_maps(pool_row["id"])
 
         wins: dict = defaultdict(int)
         maps_done: dict = {}
@@ -212,7 +216,7 @@ class StatsCog(commands.Cog):
         for _, winner in maps_done.items():
             wins[winner["osu_username"]] += 1
 
-        embed = discord.Embed(title=f"🎵 {pool['name']} — Recap", color=0xFF66AA)
+        embed = discord.Embed(title=f"🎵 {pool_row['name']} — Recap", color=0xFF66AA)
         embed.add_field(name="Maps in pool", value=str(len(maps_all)), inline=True)
         embed.add_field(name="Maps gespeeld", value=str(len(maps_done)), inline=True)
 
@@ -250,7 +254,6 @@ class StatsCog(commands.Cog):
             return await interaction.followup.send("Geen spelers geregistreerd.")
 
         all_stats = [(p["osu_username"], (await self.bot.db.get_player_stats_summary(p["discord_id"])) or {}) for p in players]
-
         stat_map = {
             "accuracy": ("avg_accuracy",  "Gem. Accuracy",  fmt_acc),
             "fc":       ("fc_count",      "FC Count",       lambda x: f"{x} FC's"),
@@ -260,7 +263,6 @@ class StatsCog(commands.Cog):
         }
         key, label, fmt = stat_map[stat]
         sorted_stats = sorted(all_stats, key=lambda x: x[1].get(key) or 0, reverse=True)
-
         lines = [f"{medal(i)} **{n}** — {fmt(s[key])}" for i, (n, s) in enumerate(sorted_stats) if s.get(key) is not None]
         embed = discord.Embed(title=f"📊 Rankings — {label}", description="\n".join(lines) or "Geen data.", color=0x66AAFF)
         await interaction.followup.send(embed=embed)

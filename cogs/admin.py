@@ -21,6 +21,28 @@ def slot_to_category(slot: str) -> str:
     return match.group(1) if match else slot.upper()
 
 
+async def pool_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete voor pool naam — werkt altijd, ook met archived threads."""
+    pools = await interaction.client.db.get_all_pools(interaction.guild_id)
+    return [
+        app_commands.Choice(name=p["name"], value=str(p["id"]))
+        for p in pools
+        if current.lower() in p["name"].lower()
+    ][:25]
+
+
+async def get_pool_by_autocomplete(bot, interaction, pool_id_str: str):
+    """Haal pool op via autocomplete value (pool ID string)."""
+    try:
+        pool_id = int(pool_id_str)
+        pool = await bot.db.get_pool_by_id(pool_id)
+    except (ValueError, Exception):
+        pool = None
+    if not pool:
+        await interaction.followup.send("❌ Pool niet gevonden.")
+    return pool
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -39,9 +61,7 @@ class AdminCog(commands.Cog):
             discord_id=member.id, osu_username=user["username"],
             osu_id=user["id"], added_by=interaction.user.id
         )
-        await interaction.followup.send(
-            f"✅ **{user['username']}** (`{user['id']}`) gekoppeld aan {member.mention}."
-        )
+        await interaction.followup.send(f"✅ **{user['username']}** (`{user['id']}`) gekoppeld aan {member.mention}.")
 
     @app_commands.command(name="remove_player", description="Verwijder een speler")
     @admin_only()
@@ -59,23 +79,16 @@ class AdminCog(commands.Cog):
         players = await self.bot.db.get_all_players()
         if not players:
             return await interaction.followup.send("Geen spelers geregistreerd.")
-        lines = [
-            f"`{i+1}.` **{p['osu_username']}** — <@{p['discord_id']}> (`{p['osu_id']}`)"
-            for i, p in enumerate(players)
-        ]
-        embed = discord.Embed(
-            title=f"👥 Spelers ({len(players)})",
-            description="\n".join(lines),
-            color=0xFF66AA
-        )
+        lines = [f"`{i+1}.` **{p['osu_username']}** — <@{p['discord_id']}> (`{p['osu_id']}`)" for i, p in enumerate(players)]
+        embed = discord.Embed(title=f"👥 Spelers ({len(players)})", description="\n".join(lines), color=0xFF66AA)
         await interaction.followup.send(embed=embed)
 
     # ── Pool beheer ──────────────────────────────────────────────────────────
 
-    @app_commands.command(name="create_pool", description="Maak een nieuwe pool aan (maakt een thread)")
+    @app_commands.command(name="create_pool", description="Maak een nieuwe pool aan (maakt een thread aan)")
     @app_commands.describe(
         name="Naam van de pool (bijv. 'Finals Pool')",
-        parent_channel="Channel waar de thread in aangemaakt wordt"
+        parent_channel="Channel waar de thread in komt (standaard: huidig channel)"
     )
     @admin_only()
     async def create_pool(self, interaction: discord.Interaction,
@@ -83,17 +96,14 @@ class AdminCog(commands.Cog):
                           parent_channel: discord.TextChannel = None):
         await interaction.response.defer()
 
-        # Gebruik opgegeven channel of huidig channel als parent
         parent = parent_channel or interaction.channel
         if not isinstance(parent, discord.TextChannel):
-            return await interaction.followup.send("❌ Threads kunnen alleen aangemaakt worden in een text channel.")
+            return await interaction.followup.send("❌ Geef een text channel op als parent.")
 
-        # Check of er al een pool met deze naam bestaat
         pools = await self.bot.db.get_all_pools(interaction.guild_id)
         if any(p["name"].lower() == name.lower() for p in pools):
             return await interaction.followup.send(f"❌ Pool **{name}** bestaat al.")
 
-        # Maak thread aan
         thread = await parent.create_thread(
             name=name,
             type=discord.ChannelType.public_thread,
@@ -101,10 +111,8 @@ class AdminCog(commands.Cog):
         )
 
         pool = await self.bot.db.create_pool(
-            name=name,
-            channel_id=thread.id,
-            guild_id=interaction.guild_id,
-            created_by=interaction.user.id
+            name=name, channel_id=thread.id,
+            guild_id=interaction.guild_id, created_by=interaction.user.id
         )
 
         embed = discord.Embed(
@@ -116,27 +124,27 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="delete_pool", description="Verwijder een pool uit de database")
-    @app_commands.describe(pool_thread="De pool thread")
+    @app_commands.describe(pool="De pool")
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @admin_only()
-    async def delete_pool(self, interaction: discord.Interaction, pool_thread: discord.Thread):
+    async def delete_pool(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer(ephemeral=True)
-        pool = await self.bot.db.get_pool_by_channel(pool_thread.id)
-        if not pool:
-            return await interaction.followup.send("❌ Deze thread is geen geregistreerde pool.")
-        await self.bot.db.delete_pool(pool["id"])
-        await interaction.followup.send(
-            f"✅ Pool **{pool['name']}** verwijderd. Thread {pool_thread.mention} bestaat nog."
-        )
+        pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
+        if not pool_row:
+            return
+        await self.bot.db.delete_pool(pool_row["id"])
+        await interaction.followup.send(f"✅ Pool **{pool_row['name']}** verwijderd uit de database.")
 
     @app_commands.command(name="add_map", description="Voeg een map toe aan een pool")
     @app_commands.describe(
-        pool_thread="De pool thread",
+        pool="De pool",
         beatmap_id="osu! beatmap ID",
         slot="Slot bijv. NM1, HD2, HR3, DT1"
     )
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @admin_only()
     async def add_map(self, interaction: discord.Interaction,
-                      pool_thread: discord.Thread,
+                      pool: str,
                       beatmap_id: int,
                       slot: str):
         await interaction.response.defer()
@@ -145,9 +153,9 @@ class AdminCog(commands.Cog):
         if not slot_clean:
             return await interaction.followup.send("❌ Ongeldig slot. Gebruik bijv. `NM1`, `HD2`, `HR3`, `DT1`.")
 
-        pool = await self.bot.db.get_pool_by_channel(pool_thread.id)
-        if not pool:
-            return await interaction.followup.send("❌ Deze thread is geen geregistreerde pool. Gebruik `/create_pool`.")
+        pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
+        if not pool_row:
+            return
 
         bm = await self.bot.osu.get_beatmap(beatmap_id)
         if not bm:
@@ -157,66 +165,61 @@ class AdminCog(commands.Cog):
         mod_category = slot_to_category(slot_clean)
 
         await self.bot.db.add_map_to_pool(
-            pool_id=pool["id"],
-            beatmap_id=bm["id"],
-            beatmapset_id=bms.get("id"),
-            title=bms.get("title", "?"),
-            artist=bms.get("artist", "?"),
-            version=bm.get("version", "?"),
-            slot=slot_clean,
-            mod_category=mod_category
+            pool_id=pool_row["id"], beatmap_id=bm["id"], beatmapset_id=bms.get("id"),
+            title=bms.get("title", "?"), artist=bms.get("artist", "?"),
+            version=bm.get("version", "?"), slot=slot_clean, mod_category=mod_category
         )
 
         embed = discord.Embed(
             title=f"✅ Map toegevoegd — {slot_clean}",
             description=f"**{bms.get('artist')} - {bms.get('title')}** [{bm.get('version')}]",
-            color=0x66AAFF,
-            url=f"https://osu.ppy.sh/beatmaps/{bm['id']}"
+            color=0x66AAFF, url=f"https://osu.ppy.sh/beatmaps/{bm['id']}"
         )
-        embed.add_field(name="Pool", value=f"{pool['name']} ({pool_thread.mention})")
+        embed.add_field(name="Pool", value=pool_row["name"])
         embed.add_field(name="Slot", value=slot_clean)
         embed.add_field(name="Vereiste mods", value=f"NF + {mod_category}" if mod_category != "NM" else "NF only")
         embed.set_thumbnail(url=bms.get("covers", {}).get("list", ""))
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="remove_map", description="Verwijder een map uit een pool")
-    @app_commands.describe(pool_thread="De pool thread", beatmap_id="osu! beatmap ID")
+    @app_commands.describe(pool="De pool", beatmap_id="osu! beatmap ID")
+    @app_commands.autocomplete(pool=pool_autocomplete)
     @admin_only()
-    async def remove_map(self, interaction: discord.Interaction,
-                         pool_thread: discord.Thread,
-                         beatmap_id: int):
+    async def remove_map(self, interaction: discord.Interaction, pool: str, beatmap_id: int):
         await interaction.response.defer(ephemeral=True)
-        pool = await self.bot.db.get_pool_by_channel(pool_thread.id)
-        if not pool:
-            return await interaction.followup.send("❌ Deze thread is geen geregistreerde pool.")
-        pm = await self.bot.db.get_pool_map(pool["id"], beatmap_id)
+        pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
+        if not pool_row:
+            return
+        pm = await self.bot.db.get_pool_map(pool_row["id"], beatmap_id)
         if not pm:
             return await interaction.followup.send("❌ Map staat niet in deze pool.")
-        await self.bot.db.remove_map_from_pool(pool["id"], beatmap_id)
-        await interaction.followup.send(
-            f"✅ **{pm['title']}** ({pm['slot']}) verwijderd uit **{pool['name']}**."
-        )
+        await self.bot.db.remove_map_from_pool(pool_row["id"], beatmap_id)
+        await interaction.followup.send(f"✅ **{pm['title']}** ({pm['slot']}) verwijderd uit **{pool_row['name']}**.")
 
     @app_commands.command(name="pool_info", description="Bekijk alle maps in een pool")
-    @app_commands.describe(pool_thread="De pool thread")
-    async def pool_info(self, interaction: discord.Interaction, pool_thread: discord.Thread):
+    @app_commands.describe(pool="De pool")
+    @app_commands.autocomplete(pool=pool_autocomplete)
+    async def pool_info(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer()
-        pool = await self.bot.db.get_pool_by_channel(pool_thread.id)
-        if not pool:
-            return await interaction.followup.send("❌ Deze thread is geen geregistreerde pool.")
+        pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
+        if not pool_row:
+            return
 
-        maps = await self.bot.db.get_pool_maps(pool["id"])
+        maps = await self.bot.db.get_pool_maps(pool_row["id"])
         if not maps:
-            return await interaction.followup.send(f"Pool **{pool['name']}** heeft nog geen maps.")
+            return await interaction.followup.send(f"Pool **{pool_row['name']}** heeft nog geen maps.")
+
+        # Probeer thread mention te maken
+        thread = interaction.guild.get_thread(pool_row["channel_id"])
+        thread_str = thread.mention if thread else f"Thread `{pool_row['channel_id']}`"
 
         categories = {}
         for m in maps:
-            cat = m["mod_category"] or "?"
-            categories.setdefault(cat, []).append(m)
+            categories.setdefault(m["mod_category"] or "?", []).append(m)
 
         cat_emojis = {"NM": "🔵", "HD": "🟡", "HR": "🔴", "DT": "🟣", "FL": "⚫", "EZ": "🟢", "TB": "🏆"}
-        embed = discord.Embed(title=f"🎵 {pool['name']}", description=pool_thread.mention, color=0xFF66AA)
-        embed.set_footer(text=f"Pool ID: {pool['id']} • {len(maps)} maps totaal")
+        embed = discord.Embed(title=f"🎵 {pool_row['name']}", description=thread_str, color=0xFF66AA)
+        embed.set_footer(text=f"Pool ID: {pool_row['id']} • {len(maps)} maps totaal")
 
         for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
             if cat not in categories:
@@ -240,18 +243,32 @@ class AdminCog(commands.Cog):
         lines = []
         for p in pools:
             thread = interaction.guild.get_thread(p["channel_id"]) or interaction.guild.get_channel(p["channel_id"])
-            thread_str = thread.mention if thread else f"(thread `{p['channel_id']}` niet gevonden)"
+            thread_str = thread.mention if thread else f"Thread `{p['channel_id']}`"
             lines.append(f"`{p['id']}` **{p['name']}** → {thread_str}")
 
         embed = discord.Embed(title=f"📋 Pools ({len(pools)})", description="\n".join(lines), color=0x66AAFF)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="set_score_channel", description="Stel het channel in voor score notificaties")
-    @app_commands.describe(channel="Channel voor notificaties (geen thread)")
+    @app_commands.describe(channel="Channel voor notificaties")
     @admin_only()
     async def set_score_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.bot.db.update_guild_settings(interaction.guild_id, score_channel_id=channel.id)
         await interaction.response.send_message(f"✅ Score notificaties → {channel.mention}.", ephemeral=True)
+
+    @app_commands.command(name="tracking_status", description="Huidige tracking status")
+    @admin_only()
+    async def tracking_status(self, interaction: discord.Interaction):
+        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
+        players = await self.bot.db.get_all_players()
+        status = "🟢 Actief" if settings["tracking_active"] else "🔴 Gestopt"
+        embed = discord.Embed(title="📡 Tracking Status", color=0x66FF99 if settings["tracking_active"] else 0xFF6666)
+        embed.add_field(name="Status", value=status)
+        embed.add_field(name="Spelers", value=str(len(players)))
+        if settings.get("score_channel_id"):
+            ch = interaction.guild.get_channel(settings["score_channel_id"])
+            embed.add_field(name="Score channel", value=ch.mention if ch else f"`{settings['score_channel_id']}`")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot):
