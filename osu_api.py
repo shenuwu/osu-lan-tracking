@@ -125,15 +125,19 @@ class OsuAPI:
             "legacy_only": 1,
         })
 
-    async def get_score(self, score_id: int):
-        """Haal een individuele score op via meerdere endpoints."""
-        # Probeer eerst de nieuwe endpoint
+    async def get_score(self, score_id: int, best_id: int = None):
+        """Haal een individuele score op. Probeert meerdere endpoints."""
+        # Probeer best_id eerst (lazer score ID)
+        if best_id:
+            result = await self.request(f"/scores/{best_id}")
+            if result and (result.get("total_score") or result.get("score")):
+                return result
+        # Probeer met het originele score_id
         result = await self.request(f"/scores/{score_id}")
         if result and (result.get("total_score") or result.get("score")):
             return result
-        # Fallback: oude endpoint
-        result = await self.request(f"/scores/osu/{score_id}")
-        return result
+        # Fallback: legacy endpoint
+        return await self.request(f"/scores/osu/{score_id}")
 
     async def get_beatmap(self, beatmap_id: int):
         return await self.request(f"/beatmaps/{beatmap_id}")

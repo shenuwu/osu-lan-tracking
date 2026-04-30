@@ -202,7 +202,9 @@ class TrackingCog(commands.Cog):
                     # Haal de echte score op via /scores/osu/{id}
                     if parsed["client_type"] == "lazer" and parsed["score"] == 0 and score_id:
                         try:
-                            score_detail = await self.bot.osu.get_score(score_id)
+                            best_id = raw.get("best_id")
+                            logger.info(f"Ophalen score_id={score_id} best_id={best_id}")
+                            score_detail = await self.bot.osu.get_score(score_id, best_id=best_id)
                             if score_detail:
                                 logger.info(f"score_detail keys={list(score_detail.keys())} total_score={score_detail.get('total_score')} score={score_detail.get('score')}")
                                 real_score = score_detail.get("total_score") or score_detail.get("score") or 0
@@ -211,7 +213,7 @@ class TrackingCog(commands.Cog):
                                 parsed["score"] = real_score
                                 logger.info(f"Score opgehaald: {player['osu_username']} raw={score_detail.get('total_score') or score_detail.get('score')} final={real_score}")
                             else:
-                                logger.warning(f"get_score gaf None terug voor score_id={score_id}")
+                                logger.warning(f"get_score gaf None terug voor score_id={score_id} best_id={best_id}")
                         except Exception as e:
                             logger.error(f"get_score gefaald voor {score_id}: {e}")
 
