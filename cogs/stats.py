@@ -268,5 +268,149 @@ class StatsCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
 
+    @app_commands.command(name="all_scores", description="Alle pool scores van iedereen, gesorteerd op score")
+    async def all_scores(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        rows = await self.bot.db.get_all_pool_scores_leaderboard(interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send("Nog geen pool scores.")
+
+        lines = []
+        for i, r in enumerate(rows[:20]):  # max 20 zodat embed niet te lang is
+            title_s = r["title"][:22] + "…" if len(r["title"]) > 22 else r["title"]
+            miss_str = "FC ✨" if not r["count_miss"] else f"{r['count_miss']}x miss"
+            lines.append(
+                f"`#{i+1}` **{r['osu_username']}** — `{r['slot']}` {title_s}\n"
+                f"  `{fmt_score(r['score'])}` • {fmt_acc(r['accuracy'])} • {miss_str} • `{r['mods']}`"
+            )
+
+        embed = discord.Embed(
+            title="🏅 Alle pool scores",
+            description="\n".join(lines),
+            color=0xFFAA00
+        )
+        if len(rows) > 20:
+            embed.set_footer(text=f"Top 20 van {len(rows)} scores")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="avg_leaderboard", description="Leaderboard op gemiddelde pool score")
+    async def avg_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        rows = await self.bot.db.get_avg_leaderboard(interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send("Nog geen pool scores.")
+
+        lines = [
+            f"{medal(i)} **{r['osu_username']}**\n"
+            f"  gem. `{fmt_score(r['avg_score'])}` • {fmt_acc(r['avg_accuracy'])} • "
+            f"{r['maps_played']} maps • {r['fc_count']} FC's"
+            for i, r in enumerate(rows)
+        ]
+        embed = discord.Embed(
+            title="📊 Gemiddelde Pool Score",
+            description="\n".join(lines),
+            color=0x66AAFF
+        )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="lan_start", description="Sla het starttijdstip van de LAN op")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def lan_start(self, interaction: discord.Interaction):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        await self.bot.db.update_guild_settings(interaction.guild_id, lan_start_time=now)
+        await interaction.response.send_message(
+            f"✅ LAN gestart op **{now.strftime('%d-%m-%Y %H:%M')} UTC**. Vanaf nu worden stats bijgehouden.",
+            ephemeral=False
+        )
+
+    @app_commands.command(name="lan_stats", description="Statistieken over de LAN-sessie")
+    @app_commands.describe(member="Laat leeg voor globale stats, of kies een speler")
+    async def lan_stats(self, interaction: discord.Interaction, member: discord.Member = None):
+        await interaction.response.defer()
+        from datetime import datetime, timezone
+
+        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
+        since = settings.get("lan_start_time")
+
+        if member:
+            # Per-speler stats
+            player = await self.bot.db.get_player(member.id)
+            if not player:
+                return await interaction.followup.send(f"❌ {member.display_name} is niet geregistreerd.")
+
+            players = await self.bot.db.get_lan_stats_per_player(interaction.guild_id, since=since)
+            pdata = next((p for p in players if p["discord_id"] == member.id), None)
+
+            if not pdata:
+                return await interaction.followup.send(f"Geen data gevonden voor **{player['osu_username']}**.")
+
+            pool_summary = await self.bot.db.get_player_pool_summary(member.id, interaction.guild_id)
+
+            embed = discord.Embed(
+                title=f"📊 LAN Stats — {player['osu_username']}",
+                color=0xFF66AA
+            )
+            if since:
+                embed.set_footer(text=f"Sinds {since.strftime('%d-%m %H:%M')} UTC")
+
+            embed.add_field(name="Scores gezet", value=str(pdata["total_scores"] or 0), inline=True)
+            embed.add_field(name="Pool scores", value=str(pdata["pool_scores"] or 0), inline=True)
+            embed.add_field(name="FC's", value=str(pdata["fc_count"] or 0), inline=True)
+            embed.add_field(name="Gem. accuracy", value=fmt_acc(pdata["avg_accuracy"]) if pdata["avg_accuracy"] else "—", inline=True)
+            embed.add_field(name="Top score", value=fmt_score(pdata["top_score"]) if pdata["top_score"] else "—", inline=True)
+            embed.add_field(
+                name="Client",
+                value=f"🌐 Lazer: {pdata['lazer_scores']} • 💾 Stable: {pdata['stable_scores']}",
+                inline=True
+            )
+
+            if pool_summary:
+                lines = []
+                for ps in pool_summary:
+                    done = ps["maps_done"] or 0
+                    total = ps["maps_total"] or 0
+                    pct = int(done / total * 10) if total > 0 else 0
+                    bar = "█" * pct + "░" * (10 - pct)
+                    lines.append(f"**{ps['pool_name']}**: `{bar}` {done}/{total}")
+                embed.add_field(name="Pool voortgang", value="\n".join(lines), inline=False)
+
+        else:
+            # Globale stats
+            global_stats = await self.bot.db.get_lan_stats_global(interaction.guild_id, since=since)
+            per_player = await self.bot.db.get_lan_stats_per_player(interaction.guild_id, since=since)
+
+            embed = discord.Embed(title="📊 LAN Stats — Globaal", color=0xFFAA00)
+            if since:
+                duration = datetime.now(timezone.utc) - since
+                hours, remainder = divmod(int(duration.total_seconds()), 3600)
+                minutes = remainder // 60
+                embed.set_footer(text=f"LAN gestart {since.strftime('%d-%m %H:%M')} UTC • {hours}u {minutes}m geleden")
+            else:
+                embed.set_footer(text="Gebruik /lan_start om een starttijdstip in te stellen")
+
+            if global_stats:
+                embed.add_field(name="Scores gezet", value=str(global_stats["total_scores"] or 0), inline=True)
+                embed.add_field(name="Pool scores", value=str(global_stats["pool_scores"] or 0), inline=True)
+                embed.add_field(name="FC's gezet", value=str(global_stats["fc_count"] or 0), inline=True)
+                embed.add_field(name="Gem. accuracy", value=fmt_acc(global_stats["avg_accuracy"]) if global_stats["avg_accuracy"] else "—", inline=True)
+                embed.add_field(name="Actieve spelers", value=str(global_stats["active_players"] or 0), inline=True)
+                embed.add_field(name="Top score", value=fmt_score(global_stats["top_score"]) if global_stats["top_score"] else "—", inline=True)
+
+            if per_player:
+                lines = []
+                for p in per_player:
+                    if not p["total_scores"]:
+                        continue
+                    lines.append(
+                        f"**{p['osu_username']}** — {p['total_scores']} scores • "
+                        f"{p['fc_count']} FC's • {fmt_acc(p['avg_accuracy']) if p['avg_accuracy'] else '—'}"
+                    )
+                if lines:
+                    embed.add_field(name="👥 Per speler", value="\n".join(lines), inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+
 async def setup(bot):
     await bot.add_cog(StatsCog(bot))

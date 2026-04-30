@@ -199,9 +199,18 @@ class OsuAPI:
                 is_valid = False
                 invalid_reason = "Score niet gepasst"
 
-        # Score ophalen — lazer recent endpoint geeft score=0, wordt apart opgehaald in tracking
+        # Score ophalen — lazer recent endpoint geeft score=0, bereken zelf
         client_type = "lazer" if self.is_lazer_score(raw) else "stable"
         raw_score = raw.get("score") or raw.get("total_score") or 0
+
+        if client_type == "lazer" and raw_score == 0:
+            bm_max_combo = beatmap.get("max_combo") or 0
+            raw_score = self._calculate_scorev2(
+                accuracy=raw.get("accuracy") or 0,
+                max_combo=raw.get("max_combo") or 0,
+                beatmap_max_combo=bm_max_combo,
+            )
+        # Geen NF x2 nodig — formule berekent al de score op 1M scale (zonder NF penalty)
 
         return {
             "osu_score_id":   raw.get("id"),
@@ -232,19 +241,16 @@ class OsuAPI:
 
     def _calculate_scorev2(self, accuracy: float, max_combo: int, beatmap_max_combo: int) -> int:
         """
-        Bereken osu! ScoreV2 score (max 1.000.000 bij SS FC).
-        combo_portion  = (combo / max_combo)^0.5 * 700_000
-        accuracy_portion = accuracy^10 * 300_000
-        NF halveert de ingame score maar wij berekenen de echte waarde direct.
+        osu! lazer standaard score formule:
+        total_score = 1_000_000 * (accuracy * 0.3 + (combo / max_combo) * 0.7)
+        Max is 1_000_000 bij SS FC. NF halveert dit in-game, wij berekenen de echte waarde.
         """
         if beatmap_max_combo > 0:
             combo_ratio = min(max_combo / beatmap_max_combo, 1.0)
         else:
-            combo_ratio = 1.0  # onbekend, neem FC aan
+            combo_ratio = 1.0
 
-        combo_portion    = (combo_ratio ** 0.5) * 700_000
-        accuracy_portion = (accuracy ** 10)     * 300_000
-        return int(combo_portion + accuracy_portion)
+        return int(1_000_000 * (accuracy * 0.3 + combo_ratio * 0.7))
 
     async def close(self):
         if self.session and not self.session.closed:

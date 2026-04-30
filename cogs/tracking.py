@@ -198,25 +198,6 @@ class TrackingCog(commands.Cog):
                         discord_id=player["discord_id"], pool_map=pool_map
                     )
 
-                    # Lazer scores komen met score=0 via recent endpoint
-                    # Haal de echte score op via /scores/osu/{id}
-                    if parsed["client_type"] == "lazer" and parsed["score"] == 0 and score_id:
-                        try:
-                            best_id = raw.get("best_id")
-                            logger.info(f"Ophalen score_id={score_id} best_id={best_id}")
-                            score_detail = await self.bot.osu.get_score(score_id, best_id=best_id)
-                            if score_detail:
-                                logger.info(f"score_detail keys={list(score_detail.keys())} total_score={score_detail.get('total_score')} score={score_detail.get('score')}")
-                                real_score = score_detail.get("total_score") or score_detail.get("score") or 0
-                                if parsed["has_nf"] and real_score > 0:
-                                    real_score = real_score * 2
-                                parsed["score"] = real_score
-                                logger.info(f"Score opgehaald: {player['osu_username']} raw={score_detail.get('total_score') or score_detail.get('score')} final={real_score}")
-                            else:
-                                logger.warning(f"get_score gaf None terug voor score_id={score_id} best_id={best_id}")
-                        except Exception as e:
-                            logger.error(f"get_score gefaald voor {score_id}: {e}")
-
                     score_db_id, is_new = await self.bot.db.save_score(parsed)
                     if not score_db_id:
                         logger.warning(f"save_score gaf geen id terug voor score {score_id}")

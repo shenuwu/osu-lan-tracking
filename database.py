@@ -144,6 +144,9 @@ class Database:
                 "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT"
             )
             await conn.execute(
+                "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS lan_start_time TIMESTAMPTZ"
+            )
+            await conn.execute(
                 "ALTER TABLE pools ADD COLUMN IF NOT EXISTS leaderboard_message_id BIGINT"
             )
 
@@ -366,6 +369,82 @@ class Database:
                 GROUP BY p.osu_username, p.discord_id
                 ORDER BY total_score DESC NULLS LAST
             """, guild_id)
+
+    async def get_all_pool_scores_leaderboard(self, guild_id):
+        """Alle individuele pool scores van iedereen, gesorteerd op score."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    pl.score, pl.accuracy, pl.mods, pl.rank, pl.count_miss,
+                    p.osu_username,
+                    pm.title, pm.artist, pm.version, pm.slot, pm.mod_category
+                FROM pool_leaderboard pl
+                JOIN players p ON p.discord_id = pl.discord_id
+                JOIN pool_maps pm ON pm.pool_id = pl.pool_id AND pm.beatmap_id = pl.beatmap_id
+                JOIN pools po ON po.id = pl.pool_id AND po.guild_id = $1
+                ORDER BY pl.score DESC
+            """, guild_id)
+
+    async def get_avg_leaderboard(self, guild_id):
+        """Leaderboard op gemiddelde pool score per speler."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch("""
+                SELECT
+                    p.osu_username, p.discord_id,
+                    AVG(pl.score)                          AS avg_score,
+                    AVG(pl.accuracy)                       AS avg_accuracy,
+                    COUNT(DISTINCT pl.beatmap_id)          AS maps_played,
+                    SUM(CASE WHEN pl.count_miss = 0 THEN 1 ELSE 0 END) AS fc_count
+                FROM players p
+                JOIN pool_leaderboard pl ON pl.discord_id = p.discord_id
+                JOIN pools po ON po.id = pl.pool_id AND po.guild_id = $1
+                GROUP BY p.osu_username, p.discord_id
+                HAVING COUNT(DISTINCT pl.beatmap_id) > 0
+                ORDER BY avg_score DESC NULLS LAST
+            """, guild_id)
+
+    async def get_lan_stats_global(self, guild_id, since=None):
+        """Globale LAN stats vanaf een bepaald tijdstip."""
+        async with self.pool.acquire() as conn:
+            query = """
+                SELECT
+                    COUNT(*)                                                AS total_scores,
+                    COUNT(*) FILTER (WHERE is_pool_score=TRUE AND is_valid=TRUE) AS pool_scores,
+                    COUNT(*) FILTER (WHERE count_miss=0 AND is_pass=TRUE)   AS fc_count,
+                    AVG(accuracy) FILTER (WHERE is_pass=TRUE)               AS avg_accuracy,
+                    COUNT(DISTINCT discord_id)                              AS active_players,
+                    MAX(score)                                              AS top_score
+                FROM scores s
+                JOIN players p ON p.discord_id = s.discord_id
+                WHERE p.discord_id IN (SELECT discord_id FROM players)
+            """
+            if since:
+                query += " AND s.submitted_at >= $1"
+                return await conn.fetchrow(query, since)
+            return await conn.fetchrow(query)
+
+    async def get_lan_stats_per_player(self, guild_id, since=None):
+        """Per-speler LAN stats."""
+        async with self.pool.acquire() as conn:
+            base = """
+                SELECT
+                    p.osu_username, p.discord_id,
+                    COUNT(s.id)                                             AS total_scores,
+                    COUNT(s.id) FILTER (WHERE s.is_pool_score=TRUE AND s.is_valid=TRUE) AS pool_scores,
+                    COUNT(s.id) FILTER (WHERE s.count_miss=0 AND s.is_pass=TRUE) AS fc_count,
+                    AVG(s.accuracy) FILTER (WHERE s.is_pass=TRUE)          AS avg_accuracy,
+                    MAX(s.score)                                            AS top_score,
+                    COUNT(s.id) FILTER (WHERE s.client_type='lazer')       AS lazer_scores,
+                    COUNT(s.id) FILTER (WHERE s.client_type='stable')      AS stable_scores
+                FROM players p
+                LEFT JOIN scores s ON s.discord_id = p.discord_id
+            """
+            if since:
+                base += " WHERE s.submitted_at >= $1 OR s.id IS NULL"
+                base += " GROUP BY p.osu_username, p.discord_id ORDER BY total_scores DESC"
+                return await conn.fetch(base, since)
+            base += " GROUP BY p.osu_username, p.discord_id ORDER BY total_scores DESC"
+            return await conn.fetch(base)
 
     async def get_player_pool_scores(self, discord_id, pool_id):
         """Alle pool scores van 1 speler in 1 pool."""
