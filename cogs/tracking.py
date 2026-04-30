@@ -215,11 +215,8 @@ class TrackingCog(commands.Cog):
                             f"score={parsed['score']} acc={parsed['accuracy']} mods={parsed['mods']} "
                             f"client={parsed['client_type']} has_nf={parsed['has_nf']}"
                         )
-                        logger.info(
-                            f"RAW: total_score={raw.get('total_score')} score={raw.get('score')} "
-                            f"legacy_total_score={raw.get('legacy_total_score')} "
-                            f"score_keys={[k for k in raw.keys() if 'score' in k.lower()]}"
-                        )
+                        logger.info(f"RAW ALL KEYS: {list(raw.keys())}")
+                        logger.info(f"RAW SCORE FIELDS: { {k:v for k,v in raw.items() if 'score' in k.lower() or k in ['total_score','score','accuracy','passed','mods','statistics']} }")
                         try:
                             improved = await self.bot.db.update_pool_leaderboard(
                                 pool_id=parsed["pool_id"],
