@@ -140,6 +140,9 @@ class Database:
             await conn.execute(
                 "ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS log_channel_id BIGINT"
             )
+            await conn.execute(
+                "ALTER TABLE pools ADD COLUMN IF NOT EXISTS leaderboard_message_id BIGINT"
+            )
 
     # ── Players ─────────────────────────────────────────────────────────────
 
@@ -189,6 +192,13 @@ class Database:
     async def get_pool_by_id(self, pool_id):
         async with self.pool.acquire() as conn:
             return await conn.fetchrow("SELECT * FROM pools WHERE id=$1", pool_id)
+
+    async def save_leaderboard_message_id(self, pool_id: int, message_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE pools SET leaderboard_message_id=$2 WHERE id=$1",
+                pool_id, message_id
+            )
 
     async def get_all_pools(self, guild_id):
         async with self.pool.acquire() as conn:

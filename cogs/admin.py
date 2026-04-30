@@ -35,7 +35,7 @@ MOD_CAT_EMOJI = {"NM": "🔵", "HD": "🟡", "HR": "🔴", "DT": "🟣", "FL": "
 
 
 async def post_pool_overview(bot, guild: discord.Guild, pool_row):
-    """Post een overzicht van alle maps in de pool thread, inclusief leaderboard scores."""
+    """Post of edit het pool overzicht in de thread."""
     thread = guild.get_thread(pool_row["channel_id"])
     if not thread:
         return
@@ -43,7 +43,6 @@ async def post_pool_overview(bot, guild: discord.Guild, pool_row):
     maps = await bot.db.get_pool_maps(pool_row["id"])
     lb_rows = await bot.db.get_pool_leaderboard(pool_row["id"])
 
-    # Bouw leaderboard index: beatmap_id -> lijst van entries
     lb_by_map = {}
     for r in lb_rows:
         lb_by_map.setdefault(r["beatmap_id"], []).append(r)
@@ -75,7 +74,18 @@ async def post_pool_overview(bot, guild: discord.Guild, pool_row):
             inline=False
         )
 
-    await thread.send(embed=embed)
+    # Probeer bestaand bericht te editen
+    existing_msg_id = pool_row.get("leaderboard_message_id")
+    if existing_msg_id:
+        try:
+            msg = await thread.fetch_message(existing_msg_id)
+            await msg.edit(embed=embed)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass  # Bericht bestaat niet meer, stuur nieuw
+
+    msg = await thread.send(embed=embed)
+    await bot.db.save_leaderboard_message_id(pool_row["id"], msg.id)
 
 
 async def get_pool_by_autocomplete(bot, interaction, pool_id_str: str):

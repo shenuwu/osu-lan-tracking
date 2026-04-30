@@ -187,12 +187,19 @@ class OsuAPI:
                 is_valid = False
                 invalid_reason = "Score niet gepasst"
 
+        # Score: lazer gebruikt total_score, stable gebruikt score
+        # Neem het grootste van de twee om edge cases op te vangen
+        raw_score = max(
+            raw.get("total_score") or 0,
+            raw.get("score") or 0,
+        )
+
         return {
             "osu_score_id":   raw.get("id"),
             "osu_id":         osu_id,
             "discord_id":     discord_id,
             "beatmap_id":     beatmap_id,
-            "score":          raw.get("total_score") or raw.get("score", 0),
+            "score":          raw_score,
             "accuracy":       round((raw.get("accuracy") or 0) * 100, 2),
             "max_combo":      raw.get("max_combo", 0),
             "mods":           mod_str,
