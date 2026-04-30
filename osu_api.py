@@ -126,18 +126,24 @@ class OsuAPI:
         })
 
     async def get_score(self, score_id: int, best_id: int = None):
-        """Haal een individuele score op. Probeert meerdere endpoints."""
-        # Probeer best_id eerst (lazer score ID)
-        if best_id:
-            result = await self.request(f"/scores/{best_id}")
-            if result and (result.get("total_score") or result.get("score")):
-                return result
-        # Probeer met het originele score_id
-        result = await self.request(f"/scores/{score_id}")
-        if result and (result.get("total_score") or result.get("score")):
-            return result
-        # Fallback: legacy endpoint
-        return await self.request(f"/scores/osu/{score_id}")
+        """Haal een individuele score op."""
+        await self.ensure_session()
+        if not self.token:
+            await self.get_token()
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        for url in [
+            f"{self.BASE}/scores/{score_id}",
+            f"{self.BASE}/scores/osu/{score_id}",
+        ]:
+            resp = await self.session.get(url, headers=headers)
+            import logging
+            logging.getLogger("tracking").info(f"GET {url} -> {resp.status}")
+            if resp.status == 200:
+                data = await resp.json()
+                logging.getLogger("tracking").info(f"Response keys: {list(data.keys())} total_score={data.get('total_score')} score={data.get('score')}")
+                return data
+        return None
 
     async def get_beatmap(self, beatmap_id: int):
         return await self.request(f"/beatmaps/{beatmap_id}")
