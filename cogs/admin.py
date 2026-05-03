@@ -2,12 +2,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import re
+from checks import admin_check, is_admin
 
 
-def admin_only():
-    async def predicate(interaction: discord.Interaction):
-        return interaction.user.guild_permissions.manage_guild
-    return app_commands.check(predicate)
+# admin_check() is imported from checks.py
 
 
 def parse_slot(slot: str) -> str | None:
@@ -52,7 +50,7 @@ async def post_pool_overview(bot, guild: discord.Guild, pool_row):
         categories.setdefault(m["mod_category"] or "?", []).append(m)
 
     embed = discord.Embed(title=f"🎵 {pool_row['name']}", color=0xFF66AA)
-    embed.set_footer(text=f"{len(maps)} maps • NF verplicht op alle slots")
+    embed.set_footer(text=f"{len(maps)} maps • NF required on all slots")
 
     for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
         if cat not in categories:
@@ -66,7 +64,7 @@ async def post_pool_overview(bot, guild: discord.Guild, pool_row):
                 miss_str = "FC ✨" if not top["count_miss"] else f"{top['count_miss']}x miss"
                 map_line += f"\n  🥇 **{top['osu_username']}** — `{top['score']:,}` • {top['accuracy']:.2f}% • {miss_str}"
             else:
-                map_line += "\n  _(nog geen scores)_"
+                map_line += "\n  _(no scores yet)_"
             lines.append(map_line)
         embed.add_field(
             name=f"{MOD_CAT_EMOJI.get(cat, '⚪')} {cat}",
@@ -96,7 +94,7 @@ async def get_pool_by_autocomplete(bot, interaction, pool_id_str: str):
     except (ValueError, Exception):
         pool = None
     if not pool:
-        await interaction.followup.send("❌ Pool niet gevonden.")
+        await interaction.followup.send("❌ Pool not found.")
     return pool
 
 
@@ -107,47 +105,47 @@ class AdminCog(commands.Cog):
     # ── Speler beheer ────────────────────────────────────────────────────────
 
     @app_commands.command(name="add_player", description="Voeg een speler handmatig toe")
-    @app_commands.describe(member="Discord gebruiker", osu_username="osu! gebruikersnaam")
-    @admin_only()
+    @app_commands.describe(member="Discord user", osu_username="osu! username")
+    @admin_check()
     async def add_player(self, interaction: discord.Interaction, member: discord.Member, osu_username: str):
         await interaction.response.defer(ephemeral=True)
         user = await self.bot.osu.get_user(osu_username)
         if not user:
-            return await interaction.followup.send(f"❌ osu! gebruiker `{osu_username}` niet gevonden.")
+            return await interaction.followup.send(f"❌ osu! gebruiker `{osu_username}` not found.")
         await self.bot.db.add_player(
             discord_id=member.id, osu_username=user["username"],
             osu_id=user["id"], added_by=interaction.user.id
         )
-        await interaction.followup.send(f"✅ **{user['username']}** (`{user['id']}`) gekoppeld aan {member.mention}.")
+        await interaction.followup.send(f"✅ **{user['username']}** (`{user['id']}`) linked to {member.mention}.")
 
     @app_commands.command(name="remove_player", description="Verwijder een speler")
-    @admin_only()
+    @admin_check()
     async def remove_player(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         result = await self.bot.db.remove_player(member.id)
         if result == "DELETE 0":
-            return await interaction.followup.send(f"❌ {member.mention} staat niet in de tracker.")
-        await interaction.followup.send(f"✅ {member.mention} verwijderd.")
+            return await interaction.followup.send(f"❌ {member.mention} is not in the tracker.")
+        await interaction.followup.send(f"✅ {member.mention} removed.")
 
     @app_commands.command(name="list_players", description="Bekijk alle geregistreerde spelers")
-    @admin_only()
+    @admin_check()
     async def list_players(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         players = await self.bot.db.get_all_players()
         if not players:
-            return await interaction.followup.send("Geen spelers geregistreerd.")
+            return await interaction.followup.send("No players registered.")
         lines = [f"`{i+1}.` **{p['osu_username']}** — <@{p['discord_id']}> (`{p['osu_id']}`)" for i, p in enumerate(players)]
-        embed = discord.Embed(title=f"👥 Spelers ({len(players)})", description="\n".join(lines), color=0xFF66AA)
+        embed = discord.Embed(title=f"👥 Players ({len(players)})", description="\n".join(lines), color=0xFF66AA)
         await interaction.followup.send(embed=embed)
 
     # ── Pool beheer ──────────────────────────────────────────────────────────
 
     @app_commands.command(name="create_pool", description="Maak een nieuwe pool aan (maakt een thread aan)")
     @app_commands.describe(
-        name="Naam van de pool (bijv. 'Finals Pool')",
-        parent_channel="Channel waar de thread in komt (standaard: huidig channel)"
+        name="Pool name (bijv. 'Finals Pool')",
+        parent_channel="Channel where the thread will be created (default: current channel)"
     )
-    @admin_only()
+    @admin_check()
     async def create_pool(self, interaction: discord.Interaction,
                           name: str,
                           parent_channel: discord.TextChannel = None):
@@ -155,11 +153,11 @@ class AdminCog(commands.Cog):
 
         parent = parent_channel or interaction.channel
         if not isinstance(parent, discord.TextChannel):
-            return await interaction.followup.send("❌ Geef een text channel op als parent.")
+            return await interaction.followup.send("❌ Please specify a text channel as parent.")
 
         pools = await self.bot.db.get_all_pools(interaction.guild_id)
         if any(p["name"].lower() == name.lower() for p in pools):
-            return await interaction.followup.send(f"❌ Pool **{name}** bestaat al.")
+            return await interaction.followup.send(f"❌ Pool **{name}** already exists.")
 
         thread = await parent.create_thread(
             name=name,
@@ -173,33 +171,33 @@ class AdminCog(commands.Cog):
         )
 
         embed = discord.Embed(
-            title="✅ Pool aangemaakt",
+            title="✅ Pool created",
             description=f"**{name}** → {thread.mention}\nPool ID: `{pool['id']}`",
             color=0x66FF99
         )
-        embed.set_footer(text="Gebruik /add_map om maps toe te voegen")
+        embed.set_footer(text="Use /add_map to add maps.")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="delete_pool", description="Verwijder een pool uit de database")
-    @app_commands.describe(pool="De pool")
+    @app_commands.describe(pool="The pool")
     @app_commands.autocomplete(pool=pool_autocomplete)
-    @admin_only()
+    @admin_check()
     async def delete_pool(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer(ephemeral=True)
         pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
         if not pool_row:
             return
         await self.bot.db.delete_pool(pool_row["id"])
-        await interaction.followup.send(f"✅ Pool **{pool_row['name']}** verwijderd uit de database.")
+        await interaction.followup.send(f"✅ Pool **{pool_row['name']}** removed from de database.")
 
     @app_commands.command(name="add_map", description="Voeg een map toe aan een pool")
     @app_commands.describe(
-        pool="De pool",
+        pool="The pool",
         beatmap_id="osu! beatmap ID",
-        slot="Slot bijv. NM1, HD2, HR3, DT1"
+        slot="Slot e.g. NM1, HD2, HR3, DT1"
     )
     @app_commands.autocomplete(pool=pool_autocomplete)
-    @admin_only()
+    @admin_check()
     async def add_map(self, interaction: discord.Interaction,
                       pool: str,
                       beatmap_id: int,
@@ -208,7 +206,7 @@ class AdminCog(commands.Cog):
 
         slot_clean = parse_slot(slot)
         if not slot_clean:
-            return await interaction.followup.send("❌ Ongeldig slot. Gebruik bijv. `NM1`, `HD2`, `HR3`, `DT1`.")
+            return await interaction.followup.send("❌ Invalid slot. Use e.g. `NM1`, `HD2`, `HR3`, `DT1`.")
 
         pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
         if not pool_row:
@@ -216,7 +214,7 @@ class AdminCog(commands.Cog):
 
         bm = await self.bot.osu.get_beatmap(beatmap_id)
         if not bm:
-            return await interaction.followup.send(f"❌ Beatmap `{beatmap_id}` niet gevonden.")
+            return await interaction.followup.send(f"❌ Beatmap `{beatmap_id}` not found.")
 
         bms = bm.get("beatmapset", {})
         mod_category = slot_to_category(slot_clean)
@@ -230,13 +228,13 @@ class AdminCog(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"✅ Map toegevoegd — {slot_clean}",
+            title=f"✅ Map added — {slot_clean}",
             description=f"**{bms.get('artist')} - {bms.get('title')}** [{bm.get('version')}]",
             color=0x66AAFF, url=f"https://osu.ppy.sh/beatmaps/{bm['id']}"
         )
         embed.add_field(name="Pool", value=pool_row["name"])
         embed.add_field(name="Slot", value=slot_clean)
-        embed.add_field(name="Vereiste mods", value=f"NF + {mod_category}" if mod_category != "NM" else "NF only")
+        embed.add_field(name="Required mods", value=f"NF + {mod_category}" if mod_category != "NM" else "NF only")
         embed.set_thumbnail(url=bms.get("covers", {}).get("list", ""))
         await interaction.followup.send(embed=embed)
 
@@ -244,9 +242,9 @@ class AdminCog(commands.Cog):
         await post_pool_overview(self.bot, interaction.guild, pool_row)
 
     @app_commands.command(name="remove_map", description="Verwijder een map uit een pool")
-    @app_commands.describe(pool="De pool", beatmap_id="osu! beatmap ID")
+    @app_commands.describe(pool="The pool", beatmap_id="osu! beatmap ID")
     @app_commands.autocomplete(pool=pool_autocomplete)
-    @admin_only()
+    @admin_check()
     async def remove_map(self, interaction: discord.Interaction, pool: str, beatmap_id: int):
         await interaction.response.defer(ephemeral=True)
         pool_row = await get_pool_by_autocomplete(self.bot, interaction, pool)
@@ -254,13 +252,13 @@ class AdminCog(commands.Cog):
             return
         pm = await self.bot.db.get_pool_map(pool_row["id"], beatmap_id)
         if not pm:
-            return await interaction.followup.send("❌ Map staat niet in deze pool.")
+            return await interaction.followup.send("❌ Map is not in this pool.")
         await self.bot.db.remove_map_from_pool(pool_row["id"], beatmap_id)
-        await interaction.followup.send(f"✅ **{pm['title']}** ({pm['slot']}) verwijderd uit **{pool_row['name']}**.")
+        await interaction.followup.send(f"✅ **{pm['title']}** ({pm['slot']}) removed from **{pool_row['name']}**.")
         await post_pool_overview(self.bot, interaction.guild, pool_row)
 
     @app_commands.command(name="pool_info", description="Bekijk alle maps in een pool")
-    @app_commands.describe(pool="De pool")
+    @app_commands.describe(pool="The pool")
     @app_commands.autocomplete(pool=pool_autocomplete)
     async def pool_info(self, interaction: discord.Interaction, pool: str):
         await interaction.response.defer()
@@ -270,7 +268,7 @@ class AdminCog(commands.Cog):
 
         maps = await self.bot.db.get_pool_maps(pool_row["id"])
         if not maps:
-            return await interaction.followup.send(f"Pool **{pool_row['name']}** heeft nog geen maps.")
+            return await interaction.followup.send(f"Pool **{pool_row['name']}** has no maps yet.")
 
         # Probeer thread mention te maken
         thread = interaction.guild.get_thread(pool_row["channel_id"])
@@ -282,7 +280,7 @@ class AdminCog(commands.Cog):
 
         cat_emojis = {"NM": "🔵", "HD": "🟡", "HR": "🔴", "DT": "🟣", "FL": "⚫", "EZ": "🟢", "TB": "🏆"}
         embed = discord.Embed(title=f"🎵 {pool_row['name']}", description=thread_str, color=0xFF66AA)
-        embed.set_footer(text=f"Pool ID: {pool_row['id']} • {len(maps)} maps totaal")
+        embed.set_footer(text=f"Pool ID: {pool_row['id']} • {len(maps)} maps total")
 
         for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
             if cat not in categories:
@@ -301,7 +299,7 @@ class AdminCog(commands.Cog):
         await interaction.response.defer()
         pools = await self.bot.db.get_all_pools(interaction.guild_id)
         if not pools:
-            return await interaction.followup.send("Geen pools aangemaakt.")
+            return await interaction.followup.send("No pools created.")
 
         lines = []
         for p in pools:
@@ -314,11 +312,45 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="set_score_channel", description="Stel het channel in voor score notificaties")
     @app_commands.describe(channel="Channel voor notificaties")
-    @admin_only()
+    @admin_check()
     async def set_score_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.bot.db.update_guild_settings(interaction.guild_id, score_channel_id=channel.id)
-        await interaction.response.send_message(f"✅ Score notificaties → {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Score notifications → {channel.mention}.", ephemeral=True)
 
+
+
+    @app_commands.command(name="reset_stats", description="Verwijder alle scores en leaderboard data (ONOMKEERBAAR)")
+    @app_commands.describe(confirm="Type 'RESET' to confirm")
+    @admin_check()
+    async def reset_stats(self, interaction: discord.Interaction, confirm: str):
+        await interaction.response.defer(ephemeral=True)
+
+        if confirm != "RESET":
+            return await interaction.followup.send("❌ Type exactly `RESET` to confirm.")
+
+        async with self.bot.db.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pool_leaderboard")
+            await conn.execute("DELETE FROM scores")
+            await conn.execute("UPDATE pools SET leaderboard_message_id=NULL")
+            await conn.execute("UPDATE guild_settings SET lan_stats_message_id=NULL, pool_lb_message_id=NULL, lan_start_time=NULL")
+
+        await interaction.followup.send("✅ All scores, leaderboard data en dashboard message IDs have been removed.")
+
+    @app_commands.command(name="reset_player_scores", description="Verwijder scores van één speler")
+    @app_commands.describe(member="The player to reset")
+    @admin_check()
+    async def reset_player_scores(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+
+        player = await self.bot.db.get_player(member.id)
+        if not player:
+            return await interaction.followup.send("❌ Speler not found.")
+
+        async with self.bot.db.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pool_leaderboard WHERE discord_id=$1", member.id)
+            await conn.execute("DELETE FROM scores WHERE discord_id=$1", member.id)
+
+        await interaction.followup.send(f"✅ All scores van **{player['osu_username']}** removed.")
 
 
 async def setup(bot):

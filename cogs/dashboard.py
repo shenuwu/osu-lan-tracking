@@ -1,4 +1,6 @@
+import os
 import discord
+from checks import admin_check
 from discord import app_commands
 from discord.ext import commands
 from collections import defaultdict
@@ -34,8 +36,8 @@ class DashboardCog(commands.Cog):
     # ── Setup command ────────────────────────────────────────────────────────
 
     @app_commands.command(name="setup_dashboard", description="Stel het dashboard channel in en maak de embeds aan")
-    @app_commands.describe(channel="Het channel voor het dashboard (pools worden threads hiervan)")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(channel="The channel for the dashboard (pools will be threads here)")
+    @admin_check()
     async def setup_dashboard(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
 
@@ -55,16 +57,16 @@ class DashboardCog(commands.Cog):
         await self.bot.db.save_dashboard_messages(interaction.guild_id, stats_msg.id, pool_msg.id)
 
         await interaction.followup.send(
-            f"✅ Dashboard aangemaakt in {channel.mention}!\n"
+            f"✅ Dashboard created in {channel.mention}!\n"
             f"Stats embed: `{stats_msg.id}` • Pool LB embed: `{pool_msg.id}`"
         )
 
     @app_commands.command(name="refresh_dashboard", description="Forceer een update van het dashboard")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @admin_check()
     async def refresh_dashboard(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self.update_dashboard(interaction.guild_id)
-        await interaction.followup.send("✅ Dashboard bijgewerkt.")
+        await interaction.followup.send("✅ Dashboard updated.")
 
     # ── Core update logic ────────────────────────────────────────────────────
 
@@ -114,31 +116,31 @@ class DashboardCog(commands.Cog):
             duration = datetime.now(timezone.utc) - since_aware
             h, rem = divmod(int(duration.total_seconds()), 3600)
             m = rem // 60
-            embed.description = f"⏱️ LAN loopt al **{h}u {m}m**"
+            embed.description = f"⏱️ LAN has been running for **{h}u {m}m**"
 
         if stats:
             playtime = stats["total_playtime_seconds"] or 0
-            embed.add_field(name="👥 Spelers", value=str(len(players)), inline=True)
-            embed.add_field(name="🎯 Scores gezet", value=str(stats["total_scores"] or 0), inline=True)
+            embed.add_field(name="👥 Players", value=str(len(players)), inline=True)
+            embed.add_field(name="🎯 Scores set", value=str(stats["total_scores"] or 0), inline=True)
             embed.add_field(name="🎱 Pool plays", value=str(stats["pool_scores"] or 0), inline=True)
-            embed.add_field(name="✨ FC's", value=str(stats["total_fcs"] or 0), inline=True)
-            embed.add_field(name="🎯 Gem. accuracy", value=fmt_acc(stats["avg_accuracy"]), inline=True)
-            embed.add_field(name="⏱️ Totale playtime", value=fmt_time(playtime), inline=True)
-            embed.add_field(name="🗺️ Unieke pool maps", value=str(stats["unique_pool_maps"] or 0), inline=True)
+            embed.add_field(name="✨ FCs", value=str(stats["total_fcs"] or 0), inline=True)
+            embed.add_field(name="🎯 Avg. accuracy", value=fmt_acc(stats["avg_accuracy"]), inline=True)
+            embed.add_field(name="⏱️ Total playtime", value=fmt_time(playtime), inline=True)
+            embed.add_field(name="🗺️ Unique pool maps", value=str(stats["unique_pool_maps"] or 0), inline=True)
             embed.add_field(name="🏆 Top score", value=fmt_score(stats["top_score"]), inline=True)
 
-        embed.set_footer(text=f"Bijgewerkt: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+        embed.set_footer(text=f"Updated: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         return embed
 
     async def _build_pool_lb_embed(self, guild_id: int) -> discord.Embed:
         rows = await self.bot.db.get_dashboard_pool_leaderboards(guild_id)
         pools = await self.bot.db.get_all_pools(guild_id)
 
-        embed = discord.Embed(title="🏆 Pool Leaderboards — Gemiddelde Score", color=0xFF66AA)
+        embed = discord.Embed(title="🏆 Pool Leaderboards — Average Score", color=0xFF66AA)
 
         if not rows:
-            embed.description = "Nog geen pool scores."
-            embed.set_footer(text=f"Bijgewerkt: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+            embed.description = "No pool scores yet."
+            embed.set_footer(text=f"Updated: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
             return embed
 
         # Groepeer per pool
@@ -151,7 +153,7 @@ class DashboardCog(commands.Cog):
             if not entries:
                 embed.add_field(
                     name=f"🎵 {pool['name']}",
-                    value="_(nog geen scores)_",
+                    value="_(no scores yet)_",
                     inline=False
                 )
                 continue
@@ -174,7 +176,7 @@ class DashboardCog(commands.Cog):
                 inline=False
             )
 
-        embed.set_footer(text=f"Bijgewerkt: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+        embed.set_footer(text=f"Updated: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         return embed
 
 

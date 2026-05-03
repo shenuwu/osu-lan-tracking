@@ -41,7 +41,7 @@ async def handle_callback(request: web.Request) -> web.Response:
         if resp.status != 200:
             text = await resp.text()
             logger.error(f"Token exchange gefaald: {resp.status} {text}")
-            return web.Response(text="Token exchange gefaald. Probeer opnieuw via /bot_link.", status=500)
+            return web.Response(text="Token exchange failed. Try again via /link_osu.", status=500)
 
         token_data = await resp.json()
         access_token  = token_data["access_token"]
@@ -59,7 +59,7 @@ async def handle_callback(request: web.Request) -> web.Response:
     logger.info(f"Bot OAuth token opgeslagen voor osu! user: {user_data.get('username')}")
 
     return web.Response(
-        text=f"✅ Bot gekoppeld als {user_data.get('username', '?')}! Je kunt dit venster sluiten.",
+        text=f"✅ Bot linked as {user_data.get('username', '?')}! You can close this window.",
         content_type="text/html"
     )
 

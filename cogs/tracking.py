@@ -1,4 +1,6 @@
+import os
 import discord
+from checks import admin_check
 from discord import app_commands
 from discord.ext import commands
 from discord.ext import tasks
@@ -53,16 +55,16 @@ class TrackingCog(commands.Cog):
     # ── Commands ─────────────────────────────────────────────────────────────
 
     @app_commands.command(name="start_tracking", description="Start het tracken van scores")
-    @app_commands.describe(interval="Poll interval in seconden (standaard 60)")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(interval="Poll interval in seconds (default 60)")
+    @admin_check()
     async def start_tracking(self, interaction: discord.Interaction, interval: int = 60):
         await interaction.response.defer(ephemeral=True)
         settings = await self.bot.db.get_guild_settings(interaction.guild_id)
         if settings["tracking_active"]:
-            return await interaction.followup.send("⚠️ Tracking is al actief.")
+            return await interaction.followup.send("⚠️ Tracking is already active.")
         players = await self.bot.db.get_all_players()
         if not players:
-            return await interaction.followup.send("❌ Geen spelers geregistreerd.")
+            return await interaction.followup.send("❌ No players registered.")
 
         self._tracking_interval = max(30, interval)
         self._guild_id = interaction.guild_id
@@ -75,64 +77,64 @@ class TrackingCog(commands.Cog):
         )
         self.tracking_loop.change_interval(seconds=self._tracking_interval)
         self.tracking_loop.start()
-        await interaction.followup.send(f"✅ Tracking gestart! Interval: **{self._tracking_interval}s** • {len(players)} spelers.")
+        await interaction.followup.send(f"✅ Tracking started! Interval: **{self._tracking_interval}s** • {len(players)} players.")
 
     @app_commands.command(name="stop_tracking", description="Stop het tracken van scores")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @admin_check()
     async def stop_tracking(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         settings = await self.bot.db.get_guild_settings(interaction.guild_id)
         if not settings["tracking_active"]:
-            return await interaction.followup.send("⚠️ Tracking is al gestopt.")
+            return await interaction.followup.send("⚠️ Tracking is already stopped.")
         if self.tracking_loop.is_running():
             self.tracking_loop.stop()
         if self._session_id:
             await self.bot.db.end_tracking_session(self._session_id)
         await self.bot.db.update_guild_settings(interaction.guild_id, tracking_active=False)
         self._session_id = None
-        await interaction.followup.send("✅ Tracking gestopt.")
+        await interaction.followup.send("✅ Tracking stopped.")
 
     @app_commands.command(name="force_poll", description="Forceer een directe poll")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @admin_check()
     async def force_poll(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         players = await self.bot.db.get_all_players()
         if not players:
-            return await interaction.followup.send("Geen spelers.")
+            return await interaction.followup.send("No players.")
         new_scores = await self._poll_all_players(interaction.guild_id, players)
-        await interaction.followup.send(f"✅ Poll klaar — **{new_scores}** nieuwe score(s).")
+        await interaction.followup.send(f"✅ Poll done — **{new_scores}** new score(s).")
 
     @app_commands.command(name="test_tracking", description="Test de API verbinding (geen opslag)")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @admin_check()
     async def test_tracking(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         players = await self.bot.db.get_all_players()
         if not players:
-            return await interaction.followup.send("Geen spelers.")
+            return await interaction.followup.send("No players.")
         test_player = players[0]
         scores = await self.bot.osu.get_recent_scores(test_player["osu_id"], limit=3)
         if scores is None:
-            return await interaction.followup.send("❌ osu! API niet bereikbaar.")
+            return await interaction.followup.send("❌ osu! API not reachable.")
         embed = discord.Embed(title="🧪 API Test", color=0x66FF99)
-        embed.add_field(name="Scores opgehaald", value=str(len(scores)))
+        embed.add_field(name="Scores fetched", value=str(len(scores)))
         if scores:
             s = self.bot.osu.parse_score(scores[0], test_player["osu_id"])
             embed.add_field(
-                name="Laatste score",
+                name="Latest score",
                 value=f"Beatmap `{s['beatmap_id']}` • **{s['client_type']}** • mods: `{s['mods']}`\n"
                       f"score: `{s['score']}` • has_nf: `{s['has_nf']}` • is_pass: `{s['is_pass']}`"
             )
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="tracking_status", description="Huidige tracking status")
-    @app_commands.checks.has_permissions(manage_guild=True)
+    @admin_check()
     async def tracking_status(self, interaction: discord.Interaction):
         settings = await self.bot.db.get_guild_settings(interaction.guild_id)
         players = await self.bot.db.get_all_players()
-        status = "🟢 Actief" if settings["tracking_active"] else "🔴 Gestopt"
+        status = "🟢 Active" if settings["tracking_active"] else "🔴 Stopped"
         embed = discord.Embed(title="📡 Tracking Status", color=0x66FF99 if settings["tracking_active"] else 0xFF6666)
         embed.add_field(name="Status", value=status)
-        embed.add_field(name="Spelers", value=str(len(players)))
+        embed.add_field(name="Players", value=str(len(players)))
         embed.add_field(name="Interval", value=f"{self._tracking_interval}s")
         if settings.get("score_channel_id"):
             ch = get_channel_or_thread(self.bot, settings["score_channel_id"])
@@ -318,7 +320,7 @@ class TrackingCog(commands.Cog):
 
             thread = get_channel_or_thread(self.bot, pool["channel_id"])
             if not thread:
-                logger.warning(f"Pool thread {pool['channel_id']} niet gevonden in cache")
+                logger.warning(f"Pool thread {pool['channel_id']} not found in cache")
                 return
 
             rows = await self.bot.db.get_pool_leaderboard(pool_id)
@@ -333,7 +335,7 @@ class TrackingCog(commands.Cog):
                 categories.setdefault(m["mod_category"] or "?", []).append(m)
 
             embed = discord.Embed(title=f"🎵 {pool['name']}", color=0xFF66AA)
-            embed.set_footer(text=f"{len(maps_all)} maps • NF verplicht op alle slots")
+            embed.set_footer(text=f"{len(maps_all)} maps • NF required on all slots")
 
             for cat in ["NM", "HD", "HR", "DT", "FL", "EZ", "TB", "?"]:
                 if cat not in categories:
@@ -350,7 +352,7 @@ class TrackingCog(commands.Cog):
                         miss_str = "FC ✨" if not top["count_miss"] else f"{top['count_miss']}x miss"
                         map_line += f"\n  🥇 **{top['osu_username']}** — `{fmt_score(top['score'])}` • {fmt_acc(top['accuracy'])} • {miss_str}"
                     else:
-                        map_line += "\n  _(nog geen scores)_"
+                        map_line += "\n  _(no scores yet)_"
                     lines.append(map_line)
                 embed.add_field(
                     name=f"{MOD_CAT_EMOJI.get(cat, '⚪')} {cat}",
