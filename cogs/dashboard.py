@@ -77,11 +77,16 @@ class DashboardCog(commands.Cog):
         stats_msg_id = settings.get("lan_stats_message_id")
         pool_lb_msg_id = settings.get("pool_lb_message_id")
 
+        print(f"[DASHBOARD] guild={guild_id} channel={channel_id} stats_msg={stats_msg_id} pool_msg={pool_lb_msg_id}")
+
         if not channel_id or not stats_msg_id or not pool_lb_msg_id:
-            return  # Dashboard nog niet opgezet
+            print("[DASHBOARD] Vroeg gestopt: IDs missen in guild_settings")
+            return
 
         channel = self.bot.get_channel(channel_id)
+        print(f"[DASHBOARD] channel object: {channel}")
         if not channel:
+            print("[DASHBOARD] Vroeg gestopt: channel niet gevonden in cache")
             return
 
         # Update stats embed
@@ -89,16 +94,18 @@ class DashboardCog(commands.Cog):
             stats_embed = await self._build_stats_embed(guild_id)
             stats_msg = await channel.fetch_message(stats_msg_id)
             await stats_msg.edit(embed=stats_embed)
-        except (discord.NotFound, Exception):
-            pass
+            print("[DASHBOARD] Stats embed updated ✅")
+        except Exception as e:
+            print(f"[DASHBOARD] Stats embed FOUT: {e}")
 
         # Update pool leaderboard embed
         try:
             pool_embed = await self._build_pool_lb_embed(guild_id)
             pool_msg = await channel.fetch_message(pool_lb_msg_id)
             await pool_msg.edit(embed=pool_embed)
-        except (discord.NotFound, Exception):
-            pass
+            print("[DASHBOARD] Pool embed updated ✅")
+        except Exception as e:
+            print(f"[DASHBOARD] Pool embed FOUT: {e}")
 
     # ── Embed builders ───────────────────────────────────────────────────────
 
