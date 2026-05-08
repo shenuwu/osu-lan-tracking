@@ -285,6 +285,15 @@ class TrackingCog(commands.Cog):
             except Exception as e:
                 logger.error(f"Fout bij pollen van {player['osu_username']}: {e}", exc_info=True)
 
+        # Dashboard altijd updaten als er nieuwe scores zijn
+        if total_new > 0:
+            dashboard = self.bot.cogs.get("DashboardCog")
+            if dashboard:
+                try:
+                    await dashboard.update_dashboard(guild_id)
+                except Exception as e:
+                    logger.error(f"Dashboard update gefaald: {e}", exc_info=True)
+
         return total_new
 
     async def _send_score_notification(self, channel, player, parsed, improved: bool):
