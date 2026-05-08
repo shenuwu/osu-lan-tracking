@@ -84,10 +84,12 @@ class DashboardCog(commands.Cog):
             return
 
         channel = self.bot.get_channel(channel_id)
-        print(f"[DASHBOARD] channel object: {channel}")
         if not channel:
-            print("[DASHBOARD] Vroeg gestopt: channel niet gevonden in cache")
-            return
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception as e:
+                print(f"[DASHBOARD] fetch_channel gefaald: {e}")
+                return
 
         # Update stats embed
         try:
