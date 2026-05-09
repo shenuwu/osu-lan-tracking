@@ -171,7 +171,18 @@ class TrackingCog(commands.Cog):
 
         for player in players:
             try:
-                raw_scores = await self.bot.osu.get_recent_scores(player["osu_id"], limit=50)
+                raw_lazer = await self.bot.osu.get_recent_scores(player["osu_id"], limit=50, legacy_only=False)
+                raw_stable = await self.bot.osu.get_recent_scores(player["osu_id"], limit=50, legacy_only=True)
+
+                # Dedupliceer op score ID
+                seen_ids = set()
+                raw_scores = []
+                for s in (raw_lazer or []) + (raw_stable or []):
+                    sid = s.get("id")
+                    if sid and sid not in seen_ids:
+                        seen_ids.add(sid)
+                        raw_scores.append(s)
+
                 if not raw_scores:
                     continue
 

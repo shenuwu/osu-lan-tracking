@@ -120,12 +120,12 @@ class OsuAPI:
     async def get_user_by_id(self, osu_id: int):
         return await self.request(f"/users/{osu_id}/osu")
 
-    async def get_recent_scores(self, osu_id: int, limit=50):
-        """Haalt recente scores op. legacy_only=1 zorgt dat score veld altijd gevuld is."""
+    async def get_recent_scores(self, osu_id: int, limit=50, legacy_only: bool = False):
+        """Haalt recente scores op. legacy_only=False voor lazer, True voor stable."""
         return await self.request(f"/users/{osu_id}/scores/recent", params={
             "limit": limit,
             "include_fails": 1,
-            "legacy_only": 1,
+            "legacy_only": 1 if legacy_only else 0,
         })
 
     async def get_score_with_token(self, score_id: int, access_token: str) -> dict | None:
