@@ -72,8 +72,11 @@ class TrackingCog(commands.Cog):
             guild_id=interaction.guild_id, started_by=interaction.user.id, interval=self._tracking_interval
         )
         self._session_id = session["id"]
+        from datetime import datetime, timezone
         await self.bot.db.update_guild_settings(
-            interaction.guild_id, tracking_active=True, tracking_session_id=self._session_id
+            interaction.guild_id, tracking_active=True,
+            tracking_session_id=self._session_id,
+            lan_start_time=datetime.now(timezone.utc)
         )
         self.tracking_loop.change_interval(seconds=self._tracking_interval)
         self.tracking_loop.start()
@@ -227,6 +230,165 @@ class TrackingCog(commands.Cog):
         await interaction.channel.send(
             f"✅ Recall klaar! **{total_new}** nieuwe scores opgeslagen uit **{total_checked}** gecontroleerde scores voor **{len(players)}** spelers."
         )
+
+    @app_commands.command(name="recall_scores", description="Haal alle historische scores op vanaf LAN start voor alle spelers")
+    @admin_check()
+    async def recall_scores(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        from datetime import datetime, timezone
+
+        settings = await self.bot.db.get_guild_settings(interaction.guild_id)
+        since = settings.get("lan_start_time")
+
+        # Zorg dat since altijd timezone-aware is
+        if since is not None and since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+
+        players = await self.bot.db.get_all_players()
+        if not players:
+            return await interaction.followup.send("❌ Geen spelers geregistreerd.")
+
+        since_str = since.strftime("%d-%m-%Y %H:%M UTC") if since else "begin der tijden (geen starttijd ingesteld — gebruik /set_lan_start)"
+        await interaction.followup.send(
+            f"⏳ Recall gestart vanaf **{since_str}** voor **{len(players)}** spelers...\n"
+            f"Check Railway logs voor details. Dit kan even duren."
+        )
+
+        pool_map_index = await self.bot.db.get_all_pool_map_ids()
+        total_new = 0
+        total_checked = 0
+
+        for player in players:
+            try:
+                player_new = 0
+                logger.info(f"[RECALL] Start voor {player['osu_username']} (osu_id={player['osu_id']}) | since={since_str}")
+
+                for offset in range(0, 500, 100):
+                    logger.info(f"[RECALL] {player['osu_username']} — ophalen offset={offset}")
+                    batch = await self.bot.osu.request(
+                        f"/users/{player['osu_id']}/scores/recent",
+                        params={"limit": 100, "offset": offset, "include_fails": 1, "legacy_only": 0}
+                    )
+
+                    if not batch:
+                        logger.info(f"[RECALL] {player['osu_username']} — geen batch bij offset={offset}, klaar")
+                        break
+
+                    logger.info(f"[RECALL] {player['osu_username']} — {len(batch)} scores ontvangen bij offset={offset}")
+
+                    stop_paging = False
+                    for raw in batch:
+                        score_id = raw.get("id")
+                        if not score_id:
+                            continue
+
+                        submitted_str = raw.get("ended_at") or raw.get("created_at", "")
+                        try:
+                            submitted_at = datetime.fromisoformat(submitted_str.replace("Z", "+00:00"))
+                            if submitted_at.tzinfo is None:
+                                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            submitted_at = None
+
+                        beatmap = raw.get("beatmap", {})
+                        beatmap_id = beatmap.get("id") or raw.get("beatmap_id")
+                        bm_title = beatmap.get("version") or str(beatmap_id)
+                        mods = raw.get("mods", [])
+                        passed = raw.get("passed", True)
+
+                        logger.info(
+                            f"[RECALL] {player['osu_username']} | score_id={score_id} "
+                            f"beatmap={beatmap_id} ({bm_title}) mods={mods} "
+                            f"passed={passed} submitted={submitted_str}"
+                        )
+
+                        # Stop paging als score ouder is dan LAN start
+                        if since and submitted_at and submitted_at < since:
+                            logger.info(f"[RECALL] {player['osu_username']} — score ouder dan LAN start ({submitted_str}), paging stoppen")
+                            stop_paging = True
+                            break
+
+                        total_checked += 1
+
+                        if await self.bot.db.score_exists(score_id):
+                            logger.info(f"[RECALL] {player['osu_username']} — score {score_id} al in DB, skip")
+                            continue
+
+                        pool_info = pool_map_index.get(beatmap_id)
+                        pool_map = None
+                        if pool_info:
+                            pool_map = {
+                                "pool_id":      pool_info["pool_id"],
+                                "pool_slot":    pool_info["slot"],
+                                "mod_category": pool_info["mod_category"] or "NM",
+                                "max_combo":    pool_info["max_combo"] or 0,
+                                "total_length": pool_info["total_length"] or 0,
+                            }
+
+                        parsed = self.bot.osu.parse_score(
+                            raw, osu_id=player["osu_id"],
+                            discord_id=player["discord_id"], pool_map=pool_map
+                        )
+
+                        logger.info(
+                            f"[RECALL] Opslaan: {player['osu_username']} | "
+                            f"score={parsed['score']} acc={parsed['accuracy']} "
+                            f"client={parsed['client_type']} pool={parsed['is_pool_score']} "
+                            f"valid={parsed['is_valid']} pass={parsed['is_pass']} reason={parsed['invalid_reason']}"
+                        )
+
+                        score_db_id, is_new = await self.bot.db.save_score(parsed)
+                        if not score_db_id:
+                            logger.warning(f"[RECALL] save_score gaf geen id voor score {score_id}")
+                            continue
+
+                        if parsed["score"] > 0:
+                            await self.bot.db.update_score_value(score_db_id, parsed["score"])
+
+                        if is_new:
+                            player_new += 1
+                            total_new += 1
+
+                        if parsed["is_pool_score"] and parsed["is_valid"] and parsed["is_pass"]:
+                            try:
+                                improved = await self.bot.db.update_pool_leaderboard(
+                                    pool_id=parsed["pool_id"],
+                                    beatmap_id=parsed["beatmap_id"],
+                                    discord_id=player["discord_id"],
+                                    score_row_id=score_db_id,
+                                    score=parsed["score"],
+                                    accuracy=parsed["accuracy"],
+                                    mods=parsed["mods"],
+                                    rank=parsed["rank"],
+                                    count_miss=parsed["count_miss"]
+                                )
+                                logger.info(f"[RECALL] Leaderboard: {player['osu_username']} op {parsed['pool_slot']} score={parsed['score']} improved={improved}")
+                            except Exception as e:
+                                logger.error(f"[RECALL] Leaderboard update fout: {e}")
+
+                    await asyncio.sleep(0.5)
+                    if stop_paging:
+                        break
+
+                logger.info(f"[RECALL] Klaar voor {player['osu_username']}: {player_new} nieuwe scores")
+
+            except Exception as e:
+                logger.error(f"[RECALL] Fout voor {player['osu_username']}: {e}", exc_info=True)
+
+        # Dashboard updaten
+        dashboard = self.bot.cogs.get("DashboardCog")
+        if dashboard:
+            try:
+                await dashboard.update_dashboard(interaction.guild_id)
+            except Exception as e:
+                logger.error(f"[RECALL] Dashboard update gefaald: {e}")
+
+        try:
+            await interaction.channel.send(
+                f"✅ **Recall klaar!** `{total_new}` nieuwe scores opgeslagen uit `{total_checked}` gecontroleerd voor `{len(players)}` spelers."
+            )
+        except Exception:
+            pass
 
     @app_commands.command(name="test_tracking", description="Test de API verbinding (geen opslag)")
     @admin_check()

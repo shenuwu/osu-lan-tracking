@@ -319,6 +319,19 @@ class AdminCog(commands.Cog):
 
 
 
+    @app_commands.command(name="set_lan_start", description="Stel de LAN starttijd in (bijv. '2026-05-09 10:00')")
+    @app_commands.describe(datetime_utc="Datum en tijd in UTC, formaat: YYYY-MM-DD HH:MM")
+    @admin_check()
+    async def set_lan_start(self, interaction: discord.Interaction, datetime_utc: str):
+        await interaction.response.defer(ephemeral=True)
+        from datetime import datetime, timezone
+        try:
+            dt = datetime.strptime(datetime_utc.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return await interaction.followup.send("❌ Ongeldig formaat. Gebruik: `YYYY-MM-DD HH:MM` (UTC)")
+        await self.bot.db.update_guild_settings(interaction.guild_id, lan_start_time=dt)
+        await interaction.followup.send(f"✅ LAN starttijd ingesteld op **{dt.strftime('%d-%m-%Y %H:%M')} UTC**.")
+
     @app_commands.command(name="reset_stats", description="Verwijder alle scores en leaderboard data (ONOMKEERBAAR)")
     @app_commands.describe(confirm="Type 'RESET' to confirm")
     @admin_check()
